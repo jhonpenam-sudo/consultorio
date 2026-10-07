@@ -151,10 +151,29 @@ form.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;align-items:center}
 .bar{height:11px;background:var(--line);border-radius:6px;overflow:hidden}
 .bar i{display:block;height:11px;background:linear-gradient(90deg,var(--acento),#0d9488);border-radius:6px}
 .card{background:var(--card);border-radius:14px;padding:18px 20px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin:14px 0}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+.brand-badge{width:42px;height:42px;border-radius:50%;background:linear-gradient(135deg,#60a5fa,var(--acento));color:#fff;
+  display:flex;align-items:center;justify-content:center;font-family:Georgia,"Times New Roman",serif;font-weight:700;font-size:16px;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.25)}
+.brand-logo{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#fff;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.25)}
+nav .brand b{font-family:Georgia,"Times New Roman",serif;font-size:18px;letter-spacing:.01em}
+.stats{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0 22px}
+.stat{flex:1;min-width:150px;background:var(--card);border-radius:14px;padding:16px 18px;box-shadow:0 1px 4px rgba(15,23,42,.08);border-left:5px solid var(--azul)}
+.stat.v2{border-left-color:var(--acento)}.stat.v3{border-left-color:var(--adv)}.stat.v4{border-left-color:#8b5cf6}
+.stat b{display:block;font-size:28px;color:var(--azul-osc);line-height:1.1}
+.stat span{display:block;font-size:12.5px;color:var(--mute);margin-top:4px;text-transform:uppercase;letter-spacing:.03em}
+.citas-hoy{display:flex;flex-direction:column;gap:10px}
+.cita-card{display:flex;align-items:center;gap:14px;background:var(--card);border-radius:12px;padding:12px 16px;box-shadow:0 1px 3px rgba(15,23,42,.08);border-left:4px solid var(--azul)}
+.cita-card .hora{font-weight:700;color:var(--azul-osc);min-width:56px;font-size:15px}
+.cita-card .info{flex:1}
+.cita-card .info b{display:block;font-size:14.5px}
+.cita-card .info small{color:var(--mute)}
+.pill{display:inline-block;padding:3px 10px;border-radius:99px;font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.02em}
+.pill.pendiente{background:#fff3cd;color:#92680a}.pill.confirmada{background:#dcfce7;color:#15803d}
+.pill.completada{background:#dbeafe;color:#1d4ed8}.pill.cancelada{background:#fee2e2;color:#b91c1c}
 @media(max-width:700px){body{display:block}nav{width:auto}main{padding:16px}}
 @media print{nav,.noprint{display:none}}
 </style></head><body>
-{% if session.u %}<nav><b>Dra. Natalia Morera</b><small>Odontología Especializada</small>
+{% if session.u %}<nav><div class=brand>{% if logo_file %}<img src="/logo?v={{logo_file}}" class=brand-logo>{% else %}<span class=brand-badge>NM</span>{% endif %}<div><b>Dra. Natalia Morera</b><small>Odontología Especializada</small></div></div>
 <div class=grp>Panel</div><a href=/>Inicio</a>
 <div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a>
 <div class=grp>Catálogos</div><a href=/odontologos>Odontólogos</a><a href=/servicios>Servicios</a>
@@ -167,7 +186,11 @@ form.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;align-items:center}
 <main>{% for m in get_flashed_messages() %}<div class=msg>{{m}}</div>{% endfor %}%%BODY%%</main></body></html>"""
 
 def page(t, body, **c):
-    return render_template_string(LAYOUT.replace("%%BODY%%", body), t=t, **c)
+    logo_file = ""
+    if session.get("u"):
+        row = q("SELECT value FROM settings WHERE key='logo_file'", one=True)
+        logo_file = row["value"] if row else ""
+    return render_template_string(LAYOUT.replace("%%BODY%%", body), t=t, logo_file=logo_file, **c)
 
 LOGIN_FORM = """<h1>Entrar</h1><form method=post class=row><input name=usuario placeholder=Usuario required autofocus>
 <input name=clave type=password placeholder=Contraseña required><button>Entrar</button></form>
@@ -202,9 +225,25 @@ def home():
     hoy = dt.date.today().isoformat()
     citas = q("SELECT c.*,p.nombre FROM citas c LEFT JOIN patients p ON p.id=c.patient_id WHERE fecha LIKE ? ORDER BY fecha", (hoy + "%",))
     n = q("SELECT COUNT(*) n FROM citas WHERE estado='pendiente' AND origen='portal'", one=True)["n"]
-    return page("Inicio", """<h1>Hoy</h1>{% if n %}<div class=msg>{{n}} reserva(s) del portal esperan confirmación. <a href=/citas>Ver citas</a></div>{% endif %}
-<table><tr><th>Hora<th>Paciente<th>Motivo<th>Estado</tr>{% for c in citas %}<tr><td>{{c.fecha[11:]}}<td>{{c.nombre or c.nombre_libre}}<td>{{c.motivo}}<td>{{c.estado}}</tr>
-{% else %}<tr><td colspan=4>No hay citas para hoy.</tr>{% endfor %}</table>""", citas=citas, n=n)
+    total_pac = q("SELECT COUNT(*) n FROM patients", one=True)["n"]
+    mes = hoy[:7]
+    pac_mes = q("SELECT COUNT(*) n FROM patients WHERE creado LIKE ?", (mes + "%",), one=True)["n"]
+    completadas_hoy = q("SELECT COUNT(*) n FROM citas WHERE fecha LIKE ? AND estado='completada'", (hoy + "%",), one=True)["n"]
+    return page("Inicio", """<h1>Hoy, {{hoy_legible}}</h1>
+{% if n %}<div class=msg>{{n}} reserva(s) del portal esperan confirmación. <a href=/citas>Ver citas</a></div>{% endif %}
+<div class=stats>
+<div class=stat><b>{{citas|length}}</b><span>Citas hoy</span></div>
+<div class="stat v2"><b>{{completadas_hoy}}</b><span>Completadas hoy</span></div>
+<div class="stat v3"><b>{{pac_mes}}</b><span>Pacientes nuevos del mes</span></div>
+<div class="stat v4"><b>{{total_pac}}</b><span>Pacientes totales</span></div>
+</div>
+<h2>Agenda de hoy</h2>
+<div class=citas-hoy>{% for c in citas %}<div class=cita-card><div class=hora>{{c.fecha[11:]}}</div>
+<div class=info><b>{{c.nombre or c.nombre_libre}}</b><small>{{c.motivo or 'Sin motivo registrado'}}</small></div>
+<span class="pill {{c.estado}}">{{c.estado}}</span></div>
+{% else %}<p>No hay citas para hoy.</p>{% endfor %}</div>""",
+        citas=citas, n=n, total_pac=total_pac, pac_mes=pac_mes, completadas_hoy=completadas_hoy,
+        hoy_legible=dt.date.today().strftime("%d/%m/%Y"))
 
 @app.route("/pacientes", methods=["GET", "POST"])
 @need("odontologo", "recepcion", "radiologo")
@@ -367,6 +406,12 @@ def rx_add(pid):
        (pid, name, request.form["descripcion"], session["u"], dt.date.today().isoformat()))
     audit("subir_rx", f"paciente {pid}: {name}")
     return redirect(f"/pacientes/{pid}")
+
+@app.route("/logo")
+def logo():
+    row = q("SELECT value FROM settings WHERE key='logo_file'", one=True)
+    if not row or not row["value"]: abort(404)
+    return send_from_directory(UPD, row["value"])
 
 @app.route("/rx/<path:n>")
 @need("odontologo", "radiologo", "recepcion")
@@ -781,13 +826,27 @@ def configuracion():
     if request.method == "POST":
         for k, _ in campos:
             ex("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, request.form.get(k, "")))
+        logo = request.files.get("logo")
+        if logo and logo.filename:
+            ext = os.path.splitext(logo.filename)[1].lower()
+            if ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+                nombre_logo = "logo" + ext
+                logo.save(os.path.join(UPD, nombre_logo))
+                ex("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("logo_file", nombre_logo))
+                flash("Logo actualizado.")
+            else:
+                flash("Formato de logo no válido. Usa PNG, JPG, SVG o WEBP.")
         audit("configuracion", "actualizo datos del prestador")
         flash("Configuración guardada.")
     vals = {k: (q("SELECT value FROM settings WHERE key=?", (k,), one=True) or {"value": ""})["value"] for k, _ in campos}
+    logo_actual = (q("SELECT value FROM settings WHERE key='logo_file'", one=True) or {"value": ""})["value"]
     return page("Configuración", """<h1>Configuración del prestador</h1>
-<form method=post class=row style=flex-direction:column;max-width:420px>
+<form method=post enctype=multipart/form-data class=row style=flex-direction:column;max-width:420px>
 {% for k,label in campos %}<label>{{label}}<br><input name="{{k}}" value="{{vals[k]}}" style=width:100%></label>{% endfor %}
-<button>Guardar</button></form>""", campos=campos, vals=vals)
+<label>Logo del consultorio (aparece en el menú lateral)<br>
+{% if logo_actual %}<div style="margin:8px 0"><img src="/logo?v={{logo_actual}}" style="max-height:60px;max-width:160px;border-radius:8px;background:#fff;padding:4px"></div>{% endif %}
+<input type=file name=logo accept="image/*"></label>
+<button>Guardar</button></form>""", campos=campos, vals=vals, logo_actual=logo_actual)
 
 @app.route("/rips", methods=["GET", "POST"])
 @need("odontologo", "admin")
