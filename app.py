@@ -65,6 +65,23 @@ def ex(sql, a=()):
 def init():
     with sqlite3.connect(DB) as c:
         c.executescript(SCHEMA)
+        cols = [r[1] for r in c.execute("PRAGMA table_info(plan)").fetchall()]
+        if "condicion" not in cols:
+            c.execute("ALTER TABLE plan ADD COLUMN condicion TEXT DEFAULT 'tratamiento'")
+        if "superficie" not in cols:
+            c.execute("ALTER TABLE plan ADD COLUMN superficie TEXT")
+        if "profesional" not in cols:
+            c.execute("ALTER TABLE plan ADD COLUMN profesional TEXT")
+        if "fecha_registro" not in cols:
+            c.execute("ALTER TABLE plan ADD COLUMN fecha_registro TEXT")
+        pcols = [r[1] for r in c.execute("PRAGMA table_info(patients)").fetchall()]
+        if "alergias" not in pcols:
+            c.execute("ALTER TABLE patients ADD COLUMN alergias TEXT")
+        if "antecedentes" not in pcols:
+            c.execute("ALTER TABLE patients ADD COLUMN antecedentes TEXT")
+        ccols = [r[1] for r in c.execute("PRAGMA table_info(citas)").fetchall()]
+        if "dentist_id" not in ccols:
+            c.execute("ALTER TABLE citas ADD COLUMN dentist_id INTEGER")
         if not c.execute("SELECT 1 FROM users WHERE usuario='admin'").fetchone():
             c.execute("INSERT INTO users(usuario,nombre,rol,clave) VALUES('admin','Administrador','admin',?)",
                       (generate_password_hash(os.environ.get("ADMIN_PASSWORD", "admin123")),))
@@ -105,23 +122,38 @@ app.jinja_env.globals["wa"] = wa
 
 LAYOUT = """<!doctype html><html lang=es><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>{{t}} - Consultorio</title><style>
-:root{--ink:#1e293b;--azul:#0b5ea8;--azul-osc:#083f73;--paper:#f1f5f9;--line:#dbe3ea;--acento:#14b8a6;--mal:#e11d48;--bien:#16a34a;--adv:#f59e0b;--mute:#64748b}
-*{box-sizing:border-box}body{margin:0;font:16px/1.5 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--paper);display:flex;min-height:100vh}
-nav{width:230px;background:var(--azul-osc);color:#fff;padding:20px 14px;flex:none}
-nav b{display:block;font-size:16px;margin-bottom:4px;color:#fff}nav small{display:block;color:#bcd4ea;margin-bottom:18px;font-size:11px}
-nav .grp{color:#8fb8da;font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin:14px 4px 4px}
-nav a{display:block;color:#eaf2fa;text-decoration:none;padding:8px 10px;border-radius:6px;font-size:14px}nav a:hover{background:var(--azul)}
-main{flex:1;padding:26px;max-width:1050px;overflow-x:auto}h1{margin:0 0 16px;font-size:26px;color:var(--azul-osc)}h2{font-size:18px;margin:28px 0 8px;color:var(--azul-osc)}
-table{border-collapse:collapse;width:100%;background:#fff;border-radius:8px;overflow:hidden}td,th{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:15px}
-th{background:#eaf2fa;color:var(--azul-osc)}
-input,select,textarea{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:#fff;max-width:100%}
-button,.btn{font:inherit;background:var(--azul);color:#fff;border:0;padding:7px 14px;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-block}
-button:hover{background:var(--azul-osc)}
+:root{--ink:#1e293b;--azul:#2563eb;--azul-osc:#1e3a8a;--azul-suave:#eef4ff;--paper:#f4f7fb;--line:#e2e8f0;
+--acento:#14b8a6;--mal:#e11d48;--bien:#16a34a;--adv:#f59e0b;--mute:#64748b;--card:#ffffff}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.55 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--paper);display:flex;min-height:100vh}
+nav{width:240px;background:linear-gradient(180deg,#1e3a8a,#172e68);color:#fff;padding:22px 14px;flex:none;box-shadow:2px 0 10px rgba(0,0,0,.08)}
+nav b{display:block;font-size:17px;margin-bottom:4px;color:#fff;letter-spacing:.02em}
+nav small{display:block;color:#aecbf5;margin-bottom:20px;font-size:11px}
+nav .grp{color:#8fb8da;font-size:11px;text-transform:uppercase;letter-spacing:.07em;margin:16px 6px 6px;font-weight:600}
+nav a{display:block;color:#eaf2fa;text-decoration:none;padding:9px 12px;border-radius:8px;font-size:14px;margin-bottom:2px;transition:background .15s}
+nav a:hover{background:rgba(255,255,255,.14)}
+main{flex:1;padding:30px 34px;max-width:1100px;overflow-x:auto}
+h1{margin:0 0 18px;font-size:27px;color:var(--azul-osc);font-weight:700}
+h2{font-size:18px;margin:30px 0 10px;color:var(--azul-osc);font-weight:600;border-bottom:2px solid var(--azul-suave);padding-bottom:6px}
+table{border-collapse:separate;border-spacing:0;width:100%;background:var(--card);border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,.08)}
+td,th{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;font-size:14.5px}
+th{background:var(--azul-suave);color:var(--azul-osc);font-weight:600;text-transform:uppercase;font-size:12px;letter-spacing:.03em}
+tr:last-child td{border-bottom:none}
+input,select,textarea{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;max-width:100%}
+input:focus,select:focus,textarea:focus{border-color:var(--azul);outline:none;box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+button,.btn{font:inherit;font-weight:600;background:var(--azul);color:#fff;border:0;padding:9px 16px;border-radius:8px;cursor:pointer;
+  text-decoration:none;display:inline-block;box-shadow:0 1px 2px rgba(37,99,235,.3);transition:background .15s,transform .1s}
+button:hover,.btn:hover{background:var(--azul-osc)}
+button:active,.btn:active{transform:translateY(1px)}
 button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(--acento)}
-form.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.msg{background:#fff4d6;border-left:4px solid var(--adv);padding:8px 12px;margin-bottom:12px;border-radius:4px}
-.bar{height:10px;background:var(--line);border-radius:5px}.bar i{display:block;height:10px;background:var(--acento);border-radius:5px}
-@media(max-width:700px){body{display:block}nav{width:auto}main{padding:14px}}
-@media print{nav,.noprint{display:none}}</style></head><body>
+form.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;align-items:center}
+.msg{background:#fff7e0;border-left:4px solid var(--adv);padding:10px 14px;margin-bottom:14px;border-radius:8px}
+.bar{height:11px;background:var(--line);border-radius:6px;overflow:hidden}
+.bar i{display:block;height:11px;background:linear-gradient(90deg,var(--acento),#0d9488);border-radius:6px}
+.card{background:var(--card);border-radius:14px;padding:18px 20px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin:14px 0}
+@media(max-width:700px){body{display:block}nav{width:auto}main{padding:16px}}
+@media print{nav,.noprint{display:none}}
+</style></head><body>
 {% if session.u %}<nav><b>Dra. Natalia Morera</b><small>Odontología Especializada</small>
 <div class=grp>Panel</div><a href=/>Inicio</a>
 <div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a>
@@ -208,6 +240,15 @@ def paciente(pid):
         else:
             plan_g.append([x["etapa"] or "Sin etapa", [x]])
     return page(p["nombre"], """<h1>{{p.nombre}}</h1><p>{{p.documento}} · {{p.telefono}} · {{p.email}}</p>
+{% if p.alergias %}<div class=msg style="background:#fee2e2;border-left-color:var(--mal)"><b>⚠ Alergias:</b> {{p.alergias}}</div>{% endif %}
+<div class=card>
+<h2 style="margin-top:0">Antecedentes médicos</h2>
+<p><b>Alergias:</b> {{p.alergias or 'Sin registrar'}}<br><b>Antecedentes / enfermedades de base:</b> {{p.antecedentes or 'Sin registrar'}}</p>
+{% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/antecedentes" class=row>
+<input name=alergias placeholder="Alergias (ej: penicilina)" value="{{p.alergias or ''}}" style="flex:1">
+<input name=antecedentes placeholder="Antecedentes / enfermedades de base" value="{{p.antecedentes or ''}}" style="flex:1">
+<button>Guardar</button></form>{% endif %}
+</div>
 <h2>Odontograma / Plan de tratamiento</h2><div class=bar><i style="width:{{(100*hecho/tot) if tot else 0}}%"></i></div>
 <p>Hecho ${{'{:,.0f}'.format(hecho)}} de ${{'{:,.0f}'.format(tot)}} ({{plan|selectattr('estado','equalto','hecho')|list|length}} de {{plan|length}} procedimientos)</p>
 {% for etapa, items in plan_g %}<h3 style="margin:14px 0 4px;font-size:15px;color:var(--azul-osc)">{{etapa}}</h3>
@@ -224,7 +265,9 @@ def paciente(pid):
 {% if session.rol in ['odontologo','admin'] %}<p><a class=btn href=/pacientes/{{p.id}}/receta-nueva>Crear receta</a></p>{% endif %}
 <h2>Radiografías</h2><table><tr><th>Fecha<th>Descripción<th>Subida por<th></tr>{% for x in rx %}<tr><td>{{x.fecha}}<td>{{x.descripcion}}<td>{{x.subido_por}}<td><a href=/rx/{{x.archivo}}>Descargar</a></tr>{% endfor %}</table>
 <form method=post action=/pacientes/{{p.id}}/rx enctype=multipart/form-data class=row><input type=file name=archivo required><input name=descripcion placeholder=Descripción><button>Subir radiografía</button></form>
-<p><a href="/pacientes/{{p.id}}/odontograma" class=btn>Ver odontograma gráfico</a></p>
+<div class=card style="text-align:center;background:linear-gradient(135deg,#2563eb,#1e3a8a)">
+<a href="/pacientes/{{p.id}}/odontograma" style="color:#fff;text-decoration:none;font-size:18px;font-weight:700">🦷 Ver odontograma gráfico</a>
+</div>
 <h2>Notas clínicas</h2><table><tr><th>Fecha<th>Usuario<th>Nota</tr>{% for n in notas %}<tr><td>{{n.fecha}}<td>{{n.usuario}}<td>{{n.texto}}</tr>{% else %}<tr><td colspan=3>Sin notas.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<form method=post action="/pacientes/{{p.id}}/notas" class=row><input name=texto placeholder="Escribir nota clínica" style="flex:1" required><button>Agregar nota</button></form>{% endif %}
 <h2>Cotizaciones</h2><table><tr><th>Fecha<th>Detalle<th>Total</tr>{% for c in cotizaciones %}<tr><td>{{c.fecha}}<td>{{c.items}}<td>${{'{:,.0f}'.format(c.total or 0)}}</tr>{% else %}<tr><td colspan=3>Sin cotizaciones.</tr>{% endfor %}</table>
@@ -330,6 +373,15 @@ def rx_add(pid):
 def rx_get(n):
     return send_from_directory(UPD, n, as_attachment=True)
 
+@app.post("/pacientes/<int:pid>/antecedentes")
+@need("odontologo", "admin", "recepcion")
+def antecedentes_add(pid):
+    f = request.form
+    ex("UPDATE patients SET alergias=?, antecedentes=? WHERE id=?",
+       (f.get("alergias", "").strip(), f.get("antecedentes", "").strip(), pid))
+    audit("antecedentes", f"paciente {pid}")
+    return redirect(f"/pacientes/{pid}")
+
 @app.post("/pacientes/<int:pid>/notas")
 @need("odontologo", "admin")
 def nota_add(pid):
@@ -375,14 +427,17 @@ def atencion_add(pid):
 def citas():
     if request.method == "POST":
         f = request.form
-        ex("INSERT INTO citas(patient_id,fecha,motivo,estado) VALUES(?,?,?,'confirmada')", (f["patient_id"], f["fecha"].replace("T", " "), f["motivo"]))
-    cs = q("SELECT c.*,p.nombre FROM citas c LEFT JOIN patients p ON p.id=c.patient_id ORDER BY fecha DESC LIMIT 100")
-    return page("Citas", """<h1>Citas</h1><table><tr><th>Fecha<th>Paciente<th>Motivo<th>Estado<th></tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.nombre or c.nombre_libre}} {{c.telefono_libre or ''}}
-<td>{{c.motivo}}<td>{{c.estado}} {{'(portal)' if c.origen=='portal'}}<td><form method=post action=/citas/{{c.id}} class=row style=margin:0>
+        ex("INSERT INTO citas(patient_id,fecha,motivo,estado,dentist_id) VALUES(?,?,?,'confirmada',?)",
+           (f["patient_id"], f["fecha"].replace("T", " "), f["motivo"], f.get("dentist_id") or None))
+    cs = q("""SELECT c.*,p.nombre,d.name dentist_name FROM citas c LEFT JOIN patients p ON p.id=c.patient_id
+              LEFT JOIN dentists d ON d.id=c.dentist_id ORDER BY fecha DESC LIMIT 100""")
+    return page("Citas", """<h1>Citas</h1><table><tr><th>Fecha<th>Paciente<th>Odontólogo<th>Motivo<th>Estado<th></tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.nombre or c.nombre_libre}} {{c.telefono_libre or ''}}
+<td>{{c.dentist_name or '—'}}<td>{{c.motivo}}<td>{{c.estado}} {{'(portal)' if c.origen=='portal'}}<td><form method=post action=/citas/{{c.id}} class=row style=margin:0>
 <select name=estado>{% for e in ['pendiente','confirmada','atendida','cancelada'] %}<option>{{e}}</option>{% endfor %}</select><button>Cambiar</button></form></tr>{% endfor %}</table>
 <h2>Nueva cita</h2><form method=post class=row><select name=patient_id required>{% for p in ps %}<option value={{p.id}}>{{p.nombre}}</option>{% endfor %}</select>
+<select name=dentist_id><option value="">Odontólogo (opcional)</option>{% for d in ds %}<option value={{d.id}}>{{d.name}}</option>{% endfor %}</select>
 <input type=datetime-local name=fecha required><input name=motivo placeholder=Motivo><button>Agendar cita</button></form>""",
-        cs=cs, ps=q("SELECT id,nombre FROM patients ORDER BY nombre"))
+        cs=cs, ps=q("SELECT id,nombre FROM patients ORDER BY nombre"), ds=q("SELECT id,name FROM dentists WHERE active=1 ORDER BY name"))
 
 @app.post("/citas/<int:i>")
 @need("odontologo", "recepcion")
@@ -609,9 +664,19 @@ def gastos():
 <form method=post class=row><input name=concept placeholder=Concepto required><input name=amount type=number step=100 placeholder=Valor required><button>Registrar gasto</button></form>
 <table><tr><th>Fecha<th>Concepto<th>Valor</tr>{% for g in gs %}<tr><td>{{g.fecha if g.fecha else g.date}}<td>{{g.concept}}<td>${{'{:,.0f}'.format(g.amount or 0)}}</tr>{% endfor %}</table>""", gs=gs)
 
-# ---- Odontograma grafico ----
+# ---- Odontograma grafico (dibujo en forma de arco de boca, dientes con forma real y condiciones clinicas) ----
 DIENTES_ADULTO = [18,17,16,15,14,13,12,11,21,22,23,24,25,26,27,28,
                    48,47,46,45,44,43,42,41,31,32,33,34,35,36,37,38]
+PUNTOS_DIENTES = {"18": [43.3, 204.5], "17": [31.0, 172.1], "16": [32.9, 138.9], "15": [49.0, 107.1], "14": [78.2, 78.8], "13": [118.6, 55.7], "12": [167.6, 39.5], "11": [221.9, 31.1], "21": [278.1, 31.1], "22": [332.4, 39.5], "23": [381.4, 55.7], "24": [421.8, 78.8], "25": [451.0, 107.1], "26": [467.1, 138.9], "27": [469.0, 172.1], "28": [456.7, 204.5], "48": [43.3, 125.5], "47": [31.0, 157.9], "46": [32.9, 191.1], "45": [49.0, 222.9], "44": [78.2, 251.2], "43": [118.6, 274.3], "42": [167.6, 290.5], "41": [221.9, 298.9], "31": [278.1, 298.9], "32": [332.4, 290.5], "33": [381.4, 274.3], "34": [421.8, 251.2], "35": [451.0, 222.9], "36": [467.1, 191.1], "37": [469.0, 157.9], "38": [456.7, 125.5]}
+CONDICIONES = {
+    "tratamiento": ("#fbbf24", "Pendiente por tratar"),
+    "caries":      ("#e11d48", "Caries"),
+    "obturado":    ("#2563eb", "Obturado / resina"),
+    "corona":      ("#a855f7", "Corona"),
+    "endodoncia":  ("#f59e0b", "Endodoncia"),
+    "ausente":     ("#64748b", "Ausente / extraído"),
+    "sano":        ("#16a34a", "Sano / realizado"),
+}
 
 @app.route("/pacientes/<int:pid>/odontograma", methods=["GET", "POST"])
 @need("odontologo", "recepcion", "radiologo", "admin")
@@ -619,37 +684,63 @@ def odontograma(pid):
     p = q("SELECT * FROM patients WHERE id=?", (pid,), one=True) or abort(404)
     if request.method == "POST" and session["rol"] in ("odontologo", "admin"):
         f = request.form
-        ex("""INSERT INTO plan(patient_id,diente,tratamiento,etapa,costo,estado,notas)
-              VALUES(?,?,?,?,?,?,?)""",
-           (pid, f["diente"], f["tratamiento"].strip(), "Odontograma", float(f.get("costo") or 0), "pendiente", f.get("notas", "")))
-        audit("odontograma_marca", f"paciente {pid} diente {f['diente']}")
+        ex("""INSERT INTO plan(patient_id,diente,tratamiento,etapa,costo,estado,notas,condicion,profesional,fecha_registro)
+              VALUES(?,?,?,?,?,?,?,?,?,?)""",
+           (pid, f["diente"], f["tratamiento"].strip(), "Odontograma", float(f.get("costo") or 0), "pendiente",
+            f.get("notas", ""), f.get("condicion", "tratamiento"), session.get("u"), dt.date.today().isoformat()))
+        audit("odontograma_marca", f"paciente {pid} diente {f['diente']} ({f.get('condicion','tratamiento')})")
         return redirect(f"/pacientes/{pid}/odontograma")
-    marcas = q("SELECT * FROM plan WHERE patient_id=?", (pid,))
-    por_diente = {}
+    marcas = q("SELECT * FROM plan WHERE patient_id=? ORDER BY id DESC", (pid,))
+    ultima_por_diente = {}
     for m in marcas:
-        por_diente.setdefault(str(m["diente"]), []).append(m)
+        if str(m["diente"]) not in ultima_por_diente:
+            ultima_por_diente[str(m["diente"])] = m
+    dientes_svg = ""
+    for d in DIENTES_ADULTO:
+        x, y = PUNTOS_DIENTES[str(d)]
+        m = ultima_por_diente.get(str(d))
+        cond = (m["condicion"] if m and m["condicion"] else None)
+        relleno, _ = CONDICIONES.get(cond, ("#ffffff", ""))
+        borde = "#1e3a8a" if not m else "#334155"
+        dientes_svg += (
+            f'<g class="diente" onclick="document.getElementById(\'diente\').value=\'{d}\';'
+            f'document.getElementById(\'diente\').scrollIntoView({{behavior:\'smooth\'}});" style="cursor:pointer">'
+            f'<path d="M {x-15} {y-4} Q {x-16} {y-16} {x} {y-16} Q {x+16} {y-16} {x+15} {y-4} '
+            f'Q {x+15} {y+10} {x+9} {y+14} Q {x} {y+18} {x-9} {y+14} Q {x-15} {y+10} {x-15} {y-4} Z" '
+            f'fill="{relleno}" stroke="{borde}" stroke-width="1.6"/>'
+            f'<text x="{x}" y="{y+1}" text-anchor="middle" font-size="10.5" font-family="Arial" '
+            f'font-weight="600" fill="{"#fff" if cond and cond!="tratamiento" else "#1e3a8a"}">{d}</text>'
+            f'</g>'
+        )
+    svg = (
+        '<svg viewBox="0 0 500 330" style="width:100%;max-width:580px;height:auto;background:linear-gradient(180deg,#fdf2f8,#f8fafc);'
+        'border:1px solid var(--line);border-radius:16px;padding:10px;box-shadow:0 1px 4px rgba(15,23,42,.08)">'
+        '<ellipse cx="250" cy="165" rx="248" ry="158" fill="none" stroke="#f3a9c7" stroke-width="2" stroke-dasharray="3 5"/>'
+        '<line x1="250" y1="25" x2="250" y2="305" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="2 4"/>'
+        + dientes_svg + '</svg>'
+    )
+    leyenda = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:5px;margin:3px 10px 3px 0;font-size:12.5px;color:var(--mute)">'
+        f'<span style="width:12px;height:12px;background:{color};border-radius:3px;display:inline-block"></span>{label}</span>'
+        for color, label in CONDICIONES.values()
+    )
+    opciones_select = "".join(f'<option value="{k}">{v[1]}</option>' for k, v in CONDICIONES.items())
     return page(f"Odontograma - {p['nombre']}", """<h1>Odontograma de {{p.nombre}}</h1>
 <p><a href="/pacientes/{{p.id}}">&larr; Volver a la ficha del paciente</a></p>
-<div style="display:grid;grid-template-columns:repeat(16,1fr);gap:4px;max-width:720px;margin:14px 0">
-{% for d in dientes_sup %}<div title="Diente {{d}}" style="text-align:center;padding:6px 2px;border-radius:6px;font-size:12px;
-  background:{{'#fde68a' if por_diente.get(d|string) else '#fff'}};border:1px solid var(--line);cursor:pointer"
-  onclick="document.getElementById('diente').value='{{d}}'">{{d}}</div>{% endfor %}
+<div class=card style="display:flex;flex-direction:column;align-items:center">""" + svg + """
+<div style="margin-top:10px;text-align:center">""" + leyenda + """</div>
+<p style="font-size:13px;color:var(--mute)">Haz clic sobre un diente para seleccionarlo abajo. Si un diente tiene varios registros, se muestra el más reciente.</p>
 </div>
-<div style="display:grid;grid-template-columns:repeat(16,1fr);gap:4px;max-width:720px;margin:0 0 20px">
-{% for d in dientes_inf %}<div title="Diente {{d}}" style="text-align:center;padding:6px 2px;border-radius:6px;font-size:12px;
-  background:{{'#fde68a' if por_diente.get(d|string) else '#fff'}};border:1px solid var(--line);cursor:pointer"
-  onclick="document.getElementById('diente').value='{{d}}'">{{d}}</div>{% endfor %}
-</div>
-<p style="font-size:13px;color:var(--mute)">Casillas amarillas = diente con algo registrado en el plan de tratamiento. Haz clic en un número para ponerlo en el formulario.</p>
-{% if session.rol in ['odontologo','admin'] %}<form method=post class=row>
+{% if session.rol in ['odontologo','admin'] %}<div class=card><form method=post class=row>
 <input id=diente name=diente placeholder="N° diente" required size=4>
+<select name=condicion>""" + opciones_select + """</select>
 <input name=tratamiento placeholder=Tratamiento required size=20><input name=costo type=number step=1000 placeholder=Costo>
-<input name=notas placeholder=Notas size=20><button>Registrar en el odontograma</button></form>{% endif %}
-<h2>Detalle por diente</h2>
-<table><tr><th>Diente<th>Tratamiento<th>Estado<th>Costo</tr>
-{% for m in marcas %}<tr><td>{{m.diente}}<td>{{m.tratamiento}}<td>{{m.estado}}<td>${{'{:,.0f}'.format(m.costo or 0)}}</tr>
-{% else %}<tr><td colspan=4>Todavía no hay nada registrado en el odontograma.</tr>{% endfor %}</table>""",
-        p=p, dientes_sup=DIENTES_ADULTO[:16], dientes_inf=DIENTES_ADULTO[16:], por_diente=por_diente, marcas=marcas)
+<input name=notas placeholder=Notas size=20><button>Registrar en el odontograma</button></form></div>{% endif %}
+<h2>Historial por diente</h2>
+<table><tr><th>Diente<th>Condición<th>Tratamiento<th>Estado<th>Costo<th>Profesional<th>Fecha</tr>
+{% for m in marcas %}<tr><td>{{m.diente}}<td>{{m.condicion or 'tratamiento'}}<td>{{m.tratamiento}}<td>{{m.estado}}<td>${{'{:,.0f}'.format(m.costo or 0)}}<td>{{m.profesional or '—'}}<td>{{m.fecha_registro or '—'}}</tr>
+{% else %}<tr><td colspan=7>Todavía no hay nada registrado en el odontograma.</tr>{% endfor %}</table>""",
+        p=p, marcas=marcas)
 
 # ---- Odontologos ----
 @app.route("/odontologos", methods=["GET", "POST"])
