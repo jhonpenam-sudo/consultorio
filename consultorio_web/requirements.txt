@@ -1,2 +1,3 @@
 flask
 gunicorn
+PSYCOPG2-BINARY
