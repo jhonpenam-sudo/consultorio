@@ -11,6 +11,11 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("DB_PATH", os.path.join(BASE, "consultorio_web.db"))
 UPD = os.environ.get("UPLOAD_DIR", os.path.join(BASE, "radiografias"))
 os.makedirs(UPD, exist_ok=True)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_PG = bool(DATABASE_URL)
+if USE_PG:
+    import psycopg2
+    import psycopg2.extras
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambiar-esta-clave")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
@@ -45,9 +50,25 @@ CREATE TABLE IF NOT EXISTS quotes(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_
 CREATE TABLE IF NOT EXISTS abonos(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, monto REAL, concepto TEXT, usuario TEXT);
 """
 
+def _pg_sql(sql):
+    # Traduce SQLite -> PostgreSQL: placeholders, tipos, e INSERT OR REPLACE
+    s = sql
+    s = s.replace("INSERT OR REPLACE INTO", "__UPSERT__")
+    s = re.sub(r"\?", "%s", s)
+    if s.strip().startswith("__UPSERT__"):
+        tabla = s.split("__UPSERT__", 1)[1].strip().split("(", 1)[0].strip()
+        s = s.replace("__UPSERT__" + " " + tabla, f"INSERT INTO {tabla}") if ("__UPSERT__ " + tabla) in s else s.replace("__UPSERT__", "INSERT INTO")
+        if tabla == "settings":
+            s = s.rstrip().rstrip(";") + " ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value"
+    s = s.replace("AUTOINCREMENT", "")
+    return s
+
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB); g.db.row_factory = sqlite3.Row
+        if USE_PG:
+            g.db = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            g.db = sqlite3.connect(DB); g.db.row_factory = sqlite3.Row
     return g.db
 
 @app.teardown_appcontext
@@ -56,13 +77,73 @@ def close(_):
     if d: d.close()
 
 def q(sql, a=(), one=False):
-    r = db().execute(sql, a).fetchall()
+    conn = db()
+    if USE_PG:
+        cur = conn.cursor()
+        cur.execute(_pg_sql(sql), tuple(a))
+        r = cur.fetchall()
+        cur.close()
+    else:
+        r = conn.execute(sql, a).fetchall()
     return (r[0] if r else None) if one else r
 
 def ex(sql, a=()):
-    c = db().execute(sql, a); db().commit(); return c.lastrowid
+    conn = db()
+    if USE_PG:
+        cur = conn.cursor()
+        s = _pg_sql(sql)
+        if s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper():
+            s = s.rstrip().rstrip(";") + " RETURNING id"
+            cur.execute(s, tuple(a))
+            row = cur.fetchone()
+            conn.commit()
+            cur.close()
+            return row["id"] if row else None
+        cur.execute(s, tuple(a))
+        conn.commit()
+        cur.close()
+        return None
+    else:
+        c = conn.execute(sql, a); conn.commit(); return c.lastrowid
+
+def _pg_schema():
+    s = SCHEMA
+    s = re.sub(r"INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY", s)
+    s = re.sub(r"INTEGER PRIMARY KEY(?!\s+AUTOINCREMENT)", "SERIAL PRIMARY KEY", s)
+    return s
 
 def init():
+    if USE_PG:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(_pg_schema())
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='plan'")
+        cols = [r[0] for r in cur.fetchall()]
+        if "condicion" not in cols:
+            cur.execute("ALTER TABLE plan ADD COLUMN condicion TEXT DEFAULT 'tratamiento'")
+        if "superficie" not in cols:
+            cur.execute("ALTER TABLE plan ADD COLUMN superficie TEXT")
+        if "profesional" not in cols:
+            cur.execute("ALTER TABLE plan ADD COLUMN profesional TEXT")
+        if "fecha_registro" not in cols:
+            cur.execute("ALTER TABLE plan ADD COLUMN fecha_registro TEXT")
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='patients'")
+        pcols = [r[0] for r in cur.fetchall()]
+        if "alergias" not in pcols:
+            cur.execute("ALTER TABLE patients ADD COLUMN alergias TEXT")
+        if "antecedentes" not in pcols:
+            cur.execute("ALTER TABLE patients ADD COLUMN antecedentes TEXT")
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='citas'")
+        ccols = [r[0] for r in cur.fetchall()]
+        if "dentist_id" not in ccols:
+            cur.execute("ALTER TABLE citas ADD COLUMN dentist_id INTEGER")
+        cur.execute("SELECT 1 FROM users WHERE usuario='admin'")
+        if not cur.fetchone():
+            cur.execute("INSERT INTO users(usuario,nombre,rol,clave) VALUES(%s,%s,%s,%s)",
+                        ('admin', 'Administrador', 'admin', generate_password_hash(os.environ.get("ADMIN_PASSWORD", "admin123"))))
+        conn.commit()
+        cur.close(); conn.close()
+        return
     with sqlite3.connect(DB) as c:
         c.executescript(SCHEMA)
         cols = [r[1] for r in c.execute("PRAGMA table_info(plan)").fetchall()]
@@ -910,6 +991,9 @@ def usuarios():
         us=q("SELECT * FROM users"), roles=ROLES, aud=q("SELECT * FROM auditoria ORDER BY id DESC LIMIT 50"))
 
 init()
-backup_db()
+if not USE_PG:
+    backup_db()
+else:
+    print("Consultorio web: usando base de datos PostgreSQL externa (Supabase).")
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
