@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY AUTOINCREMENT, name T
 CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, usuario TEXT, fecha TEXT, texto TEXT);
 CREATE TABLE IF NOT EXISTS quotes(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, items TEXT, total REAL, usuario TEXT);
 CREATE TABLE IF NOT EXISTS abonos(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, monto REAL, concepto TEXT, usuario TEXT);
+CREATE TABLE IF NOT EXISTS consentimientos(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, procedimiento TEXT, texto TEXT, firmado_por TEXT, usuario TEXT);
 """
 
 def _pg_sql(sql):
@@ -231,7 +232,8 @@ form.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;align-items:center}
 .msg{background:#fff7e0;border-left:4px solid var(--adv);padding:10px 14px;margin-bottom:14px;border-radius:8px}
 .bar{height:11px;background:var(--line);border-radius:6px;overflow:hidden}
 .bar i{display:block;height:11px;background:linear-gradient(90deg,var(--acento),#0d9488);border-radius:6px}
-.card{background:var(--card);border-radius:14px;padding:18px 20px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin:14px 0}
+.card{background:var(--card);border-radius:14px;padding:18px 20px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin:14px 0;transition:box-shadow .2s,transform .2s}
+.card:hover{box-shadow:0 4px 14px rgba(15,23,42,.12)}
 .brand{display:flex;align-items:center;gap:10px;margin-bottom:20px}
 .brand-badge{width:42px;height:42px;border-radius:50%;background:linear-gradient(135deg,#60a5fa,var(--acento));color:#fff;
   display:flex;align-items:center;justify-content:center;font-family:Georgia,"Times New Roman",serif;font-weight:700;font-size:16px;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.25)}
@@ -259,7 +261,7 @@ nav .brand b{font-family:Georgia,"Times New Roman",serif;font-size:18px;letter-s
 <div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a>
 <div class=grp>Catálogos</div><a href=/odontologos>Odontólogos</a><a href=/servicios>Servicios</a>
 <div class=grp>Punto de venta</div><a href=/ventas>Punto de venta</a><a href=/productos>Inventario</a><a href=/caja>Caja</a><a href=/gastos>Gastos</a>
-<div class=grp>Reportes y cumplimiento</div><a href=/rips>Reporte RIPS</a>
+<div class=grp>Reportes y cumplimiento</div><a href=/estadisticas>Estadísticas</a><a href=/rips>Reporte RIPS</a>
 <div class=grp>Facturación</div><a href=/ventas>Facturación electrónica</a>
 {% if session.rol=='admin' %}<div class=grp>Administración</div><a href=/usuarios>Usuarios y personal</a><a href=/configuracion>Ajustes</a>{% endif %}
 <div class=grp>Portal</div><a href=/reservar>Portal de reservas</a>
@@ -325,6 +327,95 @@ def home():
 {% else %}<p>No hay citas para hoy.</p>{% endfor %}</div>""",
         citas=citas, n=n, total_pac=total_pac, pac_mes=pac_mes, completadas_hoy=completadas_hoy,
         hoy_legible=dt.date.today().strftime("%d/%m/%Y"))
+
+@app.route("/estadisticas")
+@need("odontologo", "admin")
+def estadisticas():
+    hoy = dt.date.today()
+    meses = []
+    for i in range(5, -1, -1):
+        m = (hoy.replace(day=1) - dt.timedelta(days=1)) if i == 0 else hoy
+        y, mo = hoy.year, hoy.month - i
+        while mo <= 0:
+            mo += 12; y -= 1
+        meses.append(f"{y:04d}-{mo:02d}")
+    ingresos_mes = []
+    for ym in meses:
+        v1 = q("SELECT COALESCE(SUM(valor),0) t FROM atenciones WHERE fecha LIKE ?", (ym + "%",), one=True)["t"] or 0
+        v2 = q("SELECT COALESCE(SUM(monto),0) t FROM abonos WHERE fecha LIKE ?", (ym + "%",), one=True)["t"] or 0
+        ingresos_mes.append(float(v1) + float(v2))
+    max_ing = max(ingresos_mes) if max(ingresos_mes, default=0) > 0 else 1
+    barras_ingresos = ""
+    bw, gap, base_y, max_h = 54, 18, 230, 170
+    for idx, (ym, val) in enumerate(zip(meses, ingresos_mes)):
+        h = (val / max_ing) * max_h if max_ing else 0
+        x = 20 + idx * (bw + gap)
+        y = base_y - h
+        mes_lbl = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][int(ym[5:7]) - 1]
+        barras_ingresos += (
+            f'<rect x="{x}" y="{y}" width="{bw}" height="{h}" rx="6" fill="url(#gradIngresos)"/>'
+            f'<text x="{x+bw/2}" y="{base_y+18}" text-anchor="middle" font-size="12" fill="#64748b" font-family="Arial">{mes_lbl}</text>'
+            f'<text x="{x+bw/2}" y="{y-6}" text-anchor="middle" font-size="11" fill="#1e3a8a" font-family="Arial" font-weight="600">${val:,.0f}</text>'
+        )
+    svg_ingresos = (
+        '<svg viewBox="0 0 460 260" style="width:100%;max-width:520px;height:auto">'
+        '<defs><linearGradient id="gradIngresos" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#14b8a6"/></linearGradient></defs>'
+        f'<line x1="15" y1="{base_y}" x2="445" y2="{base_y}" stroke="#e2e8f0" stroke-width="1.5"/>'
+        + barras_ingresos + '</svg>'
+    )
+
+    estados = ["pendiente", "confirmada", "completada", "cancelada"]
+    colores_estado = {"pendiente": "#f59e0b", "confirmada": "#2563eb", "completada": "#16a34a", "cancelada": "#e11d48"}
+    conteos = {e: q("SELECT COUNT(*) n FROM citas WHERE estado=?", (e,), one=True)["n"] for e in estados}
+    total_citas = sum(conteos.values()) or 1
+    cx_pie, cy_pie, r_pie = 110, 110, 95
+    ang = -90
+    slices = ""
+    for e in estados:
+        frac = conteos[e] / total_citas
+        if frac <= 0:
+            continue
+        ang2 = ang + frac * 360
+        import math as _m
+        x1 = cx_pie + r_pie * _m.cos(_m.radians(ang)); y1 = cy_pie + r_pie * _m.sin(_m.radians(ang))
+        x2 = cx_pie + r_pie * _m.cos(_m.radians(ang2)); y2 = cy_pie + r_pie * _m.sin(_m.radians(ang2))
+        large = 1 if (ang2 - ang) > 180 else 0
+        slices += f'<path d="M{cx_pie},{cy_pie} L{x1:.1f},{y1:.1f} A{r_pie},{r_pie} 0 {large} 1 {x2:.1f},{y2:.1f} Z" fill="{colores_estado[e]}" stroke="#fff" stroke-width="2"/>'
+        ang = ang2
+    leyenda_citas = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;margin:4px 12px 4px 0;font-size:13px;color:var(--mute)">'
+        f'<span style="width:12px;height:12px;background:{colores_estado[e]};border-radius:3px;display:inline-block"></span>{e.capitalize()} ({conteos[e]})</span>'
+        for e in estados
+    )
+    svg_pie = f'<svg viewBox="0 0 220 220" style="width:100%;max-width:260px;height:auto">{slices}</svg>'
+
+    top_trat = q("""SELECT tratamiento, COUNT(*) n FROM plan GROUP BY tratamiento ORDER BY n DESC LIMIT 6""")
+    max_trat = max((t["n"] for t in top_trat), default=1) or 1
+    filas_trat = ""
+    for t in top_trat:
+        pct = (t["n"] / max_trat) * 100
+        filas_trat += (
+            f'<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;font-size:13.5px;margin-bottom:3px">'
+            f'<span>{t["tratamiento"]}</span><b>{t["n"]}</b></div>'
+            f'<div style="height:10px;background:var(--line);border-radius:5px;overflow:hidden">'
+            f'<div style="height:10px;width:{pct:.0f}%;background:linear-gradient(90deg,#2563eb,#14b8a6);border-radius:5px"></div></div></div>'
+        )
+
+    return page("Estadísticas", """<h1>Estadísticas del consultorio</h1>
+<div class=card>
+<h2 style="margin-top:0;border:0">Ingresos de los últimos 6 meses</h2>
+""" + svg_ingresos + """
+</div>
+<div class=card style="display:flex;gap:28px;flex-wrap:wrap;align-items:center">
+<div><h2 style="margin-top:0;border:0">Citas por estado</h2>""" + svg_pie + """</div>
+<div>""" + leyenda_citas + """</div>
+</div>
+<div class=card>
+<h2 style="margin-top:0;border:0">Tratamientos más realizados</h2>
+""" + (filas_trat or "<p>Todavía no hay suficientes datos.</p>") + """
+</div>""")
+
 
 @app.route("/pacientes", methods=["GET", "POST"])
 @need("odontologo", "recepcion", "radiologo")
@@ -395,6 +486,14 @@ def paciente(pid):
 <h2>Abonos y cartera</h2><table><tr><th>Fecha<th>Concepto<th>Monto</tr>{% for a in abonos %}<tr><td>{{a.fecha}}<td>{{a.concepto}}<td>${{'{:,.0f}'.format(a.monto or 0)}}</tr>{% else %}<tr><td colspan=3>Sin abonos registrados.</tr>{% endfor %}</table>
 <p>Total abonado: ${{'{:,.0f}'.format(total_abonos)}}</p>
 {% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/abono" class=row><input name=concepto placeholder=Concepto required><input name=monto type=number step=1000 placeholder=Monto required><button>Registrar abono</button></form>{% endif %}
+<h2>Consentimientos informados</h2><table><tr><th>Fecha<th>Procedimiento<th>Firmado por<th>Registrado por</tr>
+{% for c in consentimientos %}<tr><td>{{c.fecha}}<td>{{c.procedimiento}}<td>{{c.firmado_por}}<td>{{c.usuario}}</tr>{% else %}<tr><td colspan=4>Sin consentimientos registrados.</tr>{% endfor %}</table>
+{% if session.rol in ['odontologo','admin'] %}<form method=post action="/pacientes/{{p.id}}/consentimiento" class=row style="flex-direction:column;align-items:stretch">
+<input name=procedimiento placeholder="Procedimiento a realizar (ej: Extracción, Endodoncia, Implante)" required>
+<textarea name=texto rows=3 placeholder="Texto del consentimiento: riesgos, alternativas y que el paciente entendió y acepta el procedimiento"></textarea>
+<input name=firmado_por placeholder="Nombre de quien firma (paciente o acudiente)" required>
+<button style="align-self:flex-start">Guardar consentimiento</button></form>
+<p style="font-size:12.5px;color:var(--mute)">Esto deja constancia escrita; para firma manuscrita real, imprime este registro y que el paciente firme sobre el papel.</p>{% endif %}
 <h2>Atenciones (reporte RIPS)</h2><table><tr><th>Fecha<th>CUPS<th>CIE-10<th>Valor<th>Usuario</tr>{% for a in atenciones %}<tr><td>{{a.fecha}}<td>{{a.cod_cups}} {{a.desc_cups}}<td>{{a.cod_cie10}} {{a.desc_cie10}}<td>${{'{:,.0f}'.format(a.valor or 0)}}<td>{{a.usuario}}</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<form method=post action=/pacientes/{{p.id}}/atencion class=row>
 <input name=cod_cups placeholder="Código CUPS" required size=8><input name=desc_cups placeholder="Procedimiento" required size=22>
@@ -410,7 +509,8 @@ def paciente(pid):
         notas=q("SELECT * FROM notes WHERE patient_id=? ORDER BY id DESC", (pid,)),
         cotizaciones=q("SELECT * FROM quotes WHERE patient_id=? ORDER BY id DESC", (pid,)),
         abonos=q("SELECT * FROM abonos WHERE patient_id=? ORDER BY id DESC", (pid,)),
-        total_abonos=sum(a["monto"] or 0 for a in q("SELECT * FROM abonos WHERE patient_id=?", (pid,))))
+        total_abonos=sum(a["monto"] or 0 for a in q("SELECT * FROM abonos WHERE patient_id=?", (pid,))),
+        consentimientos=q("SELECT * FROM consentimientos WHERE patient_id=? ORDER BY id DESC", (pid,)))
 
 @app.post("/pacientes/<int:pid>/plan")
 @need("odontologo")
@@ -533,6 +633,16 @@ def abono_add(pid):
     ex("INSERT INTO abonos(patient_id,fecha,monto,concepto,usuario) VALUES(?,?,?,?,?)",
        (pid, dt.date.today().isoformat(), float(f["monto"] or 0), f["concepto"].strip(), session["u"]))
     audit("abono", f"paciente {pid}: {f['concepto']}")
+    return redirect(f"/pacientes/{pid}")
+
+@app.post("/pacientes/<int:pid>/consentimiento")
+@need("odontologo", "admin")
+def consentimiento_add(pid):
+    f = request.form
+    ex("INSERT INTO consentimientos(patient_id,fecha,procedimiento,texto,firmado_por,usuario) VALUES(?,?,?,?,?,?)",
+       (pid, dt.date.today().isoformat(), f["procedimiento"].strip(), f.get("texto", "").strip(), f["firmado_por"].strip(), session["u"]))
+    audit("consentimiento", f"paciente {pid}: {f['procedimiento']}")
+    flash("Consentimiento registrado.")
     return redirect(f"/pacientes/{pid}")
 
 @app.post("/pacientes/<int:pid>/atencion")
@@ -793,7 +903,7 @@ def gastos():
 # ---- Odontograma grafico (dibujo en forma de arco de boca, dientes con forma real y condiciones clinicas) ----
 DIENTES_ADULTO = [18,17,16,15,14,13,12,11,21,22,23,24,25,26,27,28,
                    48,47,46,45,44,43,42,41,31,32,33,34,35,36,37,38]
-PUNTOS_DIENTES = {"18": [43.3, 204.5], "17": [31.0, 172.1], "16": [32.9, 138.9], "15": [49.0, 107.1], "14": [78.2, 78.8], "13": [118.6, 55.7], "12": [167.6, 39.5], "11": [221.9, 31.1], "21": [278.1, 31.1], "22": [332.4, 39.5], "23": [381.4, 55.7], "24": [421.8, 78.8], "25": [451.0, 107.1], "26": [467.1, 138.9], "27": [469.0, 172.1], "28": [456.7, 204.5], "48": [43.3, 125.5], "47": [31.0, 157.9], "46": [32.9, 191.1], "45": [49.0, 222.9], "44": [78.2, 251.2], "43": [118.6, 274.3], "42": [167.6, 290.5], "41": [221.9, 298.9], "31": [278.1, 298.9], "32": [332.4, 290.5], "33": [381.4, 274.3], "34": [421.8, 251.2], "35": [451.0, 222.9], "36": [467.1, 191.1], "37": [469.0, 157.9], "38": [456.7, 125.5]}
+PUNTOS_DIENTES = {"18": [30.2, 246.7], "17": [37.0, 208.5], "16": [53.0, 172.2], "15": [77.5, 139.3], "14": [109.6, 111.2], "13": [147.9, 89.1], "12": [190.8, 73.8], "11": [236.6, 66.0], "21": [283.4, 66.0], "22": [329.2, 73.8], "23": [372.1, 89.1], "24": [410.4, 111.2], "25": [442.5, 139.3], "26": [467.0, 172.2], "27": [483.0, 208.5], "28": [489.8, 246.7], "48": [70.2, 271.5], "47": [75.8, 301.7], "46": [89.0, 330.4], "45": [109.3, 356.3], "44": [135.8, 378.5], "43": [167.4, 396.0], "42": [202.9, 408.1], "41": [240.7, 414.2], "31": [279.3, 414.2], "32": [317.1, 408.1], "33": [352.6, 396.0], "34": [384.2, 378.5], "35": [410.7, 356.3], "36": [431.0, 330.4], "37": [444.2, 301.7], "38": [449.8, 271.5]}
 CONDICIONES = {
     "tratamiento": ("#fbbf24", "Pendiente por tratar"),
     "caries":      ("#e11d48", "Caries"),
@@ -839,10 +949,12 @@ def odontograma(pid):
             f'</g>'
         )
     svg = (
-        '<svg viewBox="0 0 500 330" style="width:100%;max-width:580px;height:auto;background:linear-gradient(180deg,#fdf2f8,#f8fafc);'
+        '<svg viewBox="0 0 520 450" style="width:100%;max-width:600px;height:auto;background:linear-gradient(180deg,#fdf2f8,#f8fafc);'
         'border:1px solid var(--line);border-radius:16px;padding:10px;box-shadow:0 1px 4px rgba(15,23,42,.08)">'
-        '<ellipse cx="250" cy="165" rx="248" ry="158" fill="none" stroke="#f3a9c7" stroke-width="2" stroke-dasharray="3 5"/>'
-        '<line x1="250" y1="25" x2="250" y2="305" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="2 4"/>'
+        '<ellipse cx="260" cy="240" rx="258" ry="218" fill="none" stroke="#f3a9c7" stroke-width="2" stroke-dasharray="3 5"/>'
+        '<line x1="260" y1="30" x2="260" y2="450" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="2 4"/>'
+        '<text x="260" y="18" text-anchor="middle" font-size="11" fill="#94a3b8" font-family="Arial">Arcada superior</text>'
+        '<text x="260" y="445" text-anchor="middle" font-size="11" fill="#94a3b8" font-family="Arial">Arcada inferior</text>'
         + dientes_svg + '</svg>'
     )
     leyenda = "".join(
