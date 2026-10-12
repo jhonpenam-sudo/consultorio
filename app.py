@@ -52,10 +52,12 @@ CREATE TABLE IF NOT EXISTS consentimientos(id INTEGER PRIMARY KEY AUTOINCREMENT,
 """
 
 def _pg_sql(sql):
-    # Traduce SQLite -> PostgreSQL: placeholders, tipos, e INSERT OR REPLACE
+    # Traduce SQLite -> PostgreSQL: placeholders, funciones, tipos e INSERT OR REPLACE
     s = sql
     s = s.replace("INSERT OR REPLACE INTO", "__UPSERT__")
     s = re.sub(r"\?", "%s", s)
+    # GROUP_CONCAT (SQLite) -> STRING_AGG (PostgreSQL)
+    s = re.sub(r"GROUP_CONCAT\(([^,()]+),\s*([^()]+)\)", r"STRING_AGG(\1, \2)", s)
     if s.strip().startswith("__UPSERT__"):
         tabla = s.split("__UPSERT__", 1)[1].strip().split("(", 1)[0].strip()
         s = s.replace("__UPSERT__" + " " + tabla, f"INSERT INTO {tabla}") if ("__UPSERT__ " + tabla) in s else s.replace("__UPSERT__", "INSERT INTO")
@@ -81,9 +83,14 @@ def q(sql, a=(), one=False):
     conn = db()
     if USE_PG:
         cur = conn.cursor()
-        cur.execute(_pg_sql(sql), tuple(a))
-        r = cur.fetchall()
-        cur.close()
+        try:
+            cur.execute(_pg_sql(sql), tuple(a))
+            r = cur.fetchall()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
     else:
         r = conn.execute(sql, a).fetchall()
     return (r[0] if r else None) if one else r
@@ -92,18 +99,25 @@ def ex(sql, a=()):
     conn = db()
     if USE_PG:
         cur = conn.cursor()
-        s = _pg_sql(sql)
-        if s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper():
-            s = s.rstrip().rstrip(";") + " RETURNING id"
+        try:
+            s = _pg_sql(sql)
+            # La tabla settings no tiene columna id, por eso no se le pide RETURNING id
+            quiere_id = (s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper()
+                         and not re.match(r"\s*INSERT\s+INTO\s+settings\b", s, re.I))
+            if quiere_id:
+                s = s.rstrip().rstrip(";") + " RETURNING id"
+                cur.execute(s, tuple(a))
+                row = cur.fetchone()
+                conn.commit()
+                return row["id"] if row else None
             cur.execute(s, tuple(a))
-            row = cur.fetchone()
             conn.commit()
+            return None
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
             cur.close()
-            return row["id"] if row else None
-        cur.execute(s, tuple(a))
-        conn.commit()
-        cur.close()
-        return None
     else:
         c = conn.execute(sql, a); conn.commit(); return c.lastrowid
 
@@ -472,7 +486,7 @@ def paciente(pid):
 <td><form method=post action=/labs/{{l.id}}><select name=estado onchange=this.form.submit()>{% for e in ['enviado','en proceso','recibido','instalado'] %}<option {{'selected' if e==l.estado}}>{{e}}</option>{% endfor %}</select></form></tr>{% endfor %}</table>
 <form method=post action=/pacientes/{{p.id}}/lab class=row><input name=laboratorio placeholder=Laboratorio required><input name=trabajo placeholder=Trabajo required>
 <input name=entrega type=date title="Fecha de entrega"><button>Registrar envío</button></form>
-<h2>Recetas</h2><table><tr><th>Folio<th>Fecha<th>Diagnóstico<th>Medicamentos<th></tr>{% for r in recetas %}<tr><td>{{r.folio}}<td>{{r.fecha}}<td>{{r.diagnostico}}<td>{{r.resumen}}<td><a href=/recetas/{{r.id}}>Ver / imprimir</a></tr>{% endfor %}</table>
+<h2>Recetas</h2><table><tr><th>Folio<th>Fecha<th>Diagnóstico<th>Medicamentos<th></tr>{% for r in recetas %}<tr><td>{{r.folio}}<td>{{r.fecha}}<td>{{r.diagnostico}}<td>{{r.resumen or ''}}<td><a href=/recetas/{{r.id}}>Ver / imprimir</a></tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<p><a class=btn href=/pacientes/{{p.id}}/receta-nueva>Crear receta</a></p>{% endif %}
 <h2>Radiografías</h2><table><tr><th>Fecha<th>Descripción<th>Subida por<th></tr>{% for x in rx %}<tr><td>{{x.fecha}}<td>{{x.descripcion}}<td>{{x.subido_por}}<td><a href=/rx/{{x.archivo}}>Descargar</a></tr>{% endfor %}</table>
 <form method=post action=/pacientes/{{p.id}}/rx enctype=multipart/form-data class=row><input type=file name=archivo required><input name=descripcion placeholder=Descripción><button>Subir radiografía</button></form>
@@ -481,7 +495,7 @@ def paciente(pid):
 </div>
 <h2>Notas clínicas</h2><table><tr><th>Fecha<th>Usuario<th>Nota</tr>{% for n in notas %}<tr><td>{{n.fecha}}<td>{{n.usuario}}<td>{{n.texto}}</tr>{% else %}<tr><td colspan=3>Sin notas.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<form method=post action="/pacientes/{{p.id}}/notas" class=row><input name=texto placeholder="Escribir nota clínica" style="flex:1" required><button>Agregar nota</button></form>{% endif %}
-<h2>Cotizaciones</h2><table><tr><th>Fecha<th>Detalle<th>Total</tr>{% for c in cotizaciones %}<tr><td>{{c.fecha}}<td>{{c.items}}<td>${{'{:,.0f}'.format(c.total or 0)}}</tr>{% else %}<tr><td colspan=3>Sin cotizaciones.</tr>{% endfor %}</table>
+<h2>Cotizaciones</h2><table><tr><th>Fecha<th>Detalle<th>Total</tr>{% for c in cotizaciones %}<tr><td>{{c.fecha}}<td>{{c['items']}}<td>${{'{:,.0f}'.format(c.total or 0)}}</tr>{% else %}<tr><td colspan=3>Sin cotizaciones.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/cotizacion" class=row><input name=items placeholder="Detalle del tratamiento cotizado" style="flex:1" required><input name=total type=number step=1000 placeholder=Total required><button>Guardar cotización</button></form>{% endif %}
 <h2>Abonos y cartera</h2><table><tr><th>Fecha<th>Concepto<th>Monto</tr>{% for a in abonos %}<tr><td>{{a.fecha}}<td>{{a.concepto}}<td>${{'{:,.0f}'.format(a.monto or 0)}}</tr>{% else %}<tr><td colspan=3>Sin abonos registrados.</tr>{% endfor %}</table>
 <p>Total abonado: ${{'{:,.0f}'.format(total_abonos)}}</p>
@@ -694,7 +708,8 @@ def recordatorios():
 @need("odontologo", "recepcion")
 def reactivacion():
     lim = (dt.date.today() - dt.timedelta(days=180)).isoformat()
-    ps = q("""SELECT * FROM (SELECT p.*,(SELECT MAX(substr(fecha,1,10)) FROM citas c WHERE c.patient_id=p.id AND c.estado='atendida') ultima FROM patients p)
+    # PostgreSQL exige un alias en la subconsulta del FROM (por eso "t")
+    ps = q("""SELECT * FROM (SELECT p.*,(SELECT MAX(substr(fecha,1,10)) FROM citas c WHERE c.patient_id=p.id AND c.estado='atendida') AS ultima FROM patients p) t
               WHERE (ultima IS NULL AND creado<?) OR ultima<? ORDER BY ultima""", (lim, lim))
     return page("Reactivar", """<h1>Pacientes sin visita en 6 meses</h1><table><tr><th>Paciente<th>Última visita<th>Contactar</tr>{% for p in ps %}<tr><td>{{p.nombre}}<td>{{p.ultima or 'sin visitas'}}
 <td>{% set m='Hola '+p.nombre+', hace tiempo no nos visita. ¿Le agendamos su control en Dra. Natalia Morera Odontología?' %}{% if wa(p.telefono,m) %}<a class=btn href="{{wa(p.telefono,m)}}" target=_blank>WhatsApp</a>{% endif %}</tr>
@@ -873,7 +888,7 @@ def ventas():
 <input name=qty type=number value=1 min=1><select name=method><option value=efectivo>Efectivo</option><option value=tarjeta>Tarjeta</option><option value=transferencia>Transferencia</option></select>
 <button>Registrar venta</button></form>
 <h2>Últimas ventas</h2><table><tr><th>Fecha<th>Paciente<th>Detalle<th>Total<th>Método</tr>
-{% for v in ventas %}<tr><td>{{v.date}}<td>{{v.paciente or '—'}}<td>{{v.items}}<td>${{'{:,.0f}'.format(v.total or 0)}}<td>{{v.method}}<td><a href="/einvoices/{{v.id}}">Factura DIAN</a></tr>
+{% for v in ventas %}<tr><td>{{v.date}}<td>{{v.paciente or '—'}}<td>{{v['items']}}<td>${{'{:,.0f}'.format(v.total or 0)}}<td>{{v.method}}<td><a href="/einvoices/{{v.id}}">Factura DIAN</a></tr>
 {% else %}<tr><td colspan=5>No hay ventas registradas.</tr>{% endfor %}</table>""", ventas=ventas_rows, productos=productos_disp, pacientes=pacientes_disp)
 
 @app.route("/einvoices/<int:sale_id>")
@@ -1094,7 +1109,9 @@ def usuarios():
             try:
                 ex("INSERT INTO users(usuario,nombre,rol,clave) VALUES(?,?,?,?)", (f["usuario"].strip(), f["nombre"], f["rol"], generate_password_hash(f["clave"])))
                 audit("crear_usuario", f["usuario"].strip())
-            except sqlite3.IntegrityError: flash("Ese usuario ya existe.")
+            except Exception:
+                # SQLite lanza sqlite3.IntegrityError y PostgreSQL psycopg2.IntegrityError (usuario repetido)
+                flash("Ese usuario ya existe.")
     return page("Usuarios", """<h1>Usuarios</h1><table><tr><th>Usuario<th>Nombre<th>Rol</tr>{% for u in us %}<tr><td>{{u.usuario}}<td>{{u.nombre}}<td>{{u.rol}}</tr>{% endfor %}</table>
 <h2>Nuevo usuario</h2><form method=post class=row><input name=usuario placeholder=Usuario required><input name=nombre placeholder=Nombre>
 <input name=clave type=password placeholder="Contraseña (mínimo 8, letras y números)" required><select name=rol>{% for r in roles %}<option>{{r}}</option>{% endfor %}</select>
