@@ -143,7 +143,9 @@ def ex(sql, a=()):
     if USE_PG:
         cur = conn.cursor()
         s = _pg_sql(sql)
-        if s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper():
+        _m = re.match(r"\s*INSERT\s+INTO\s+(\w+)", s, re.I)
+        _sin_id = bool(_m) and _m.group(1).lower() in ("settings",)
+        if s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper() and not _sin_id:
             s = s.rstrip().rstrip(";") + " RETURNING id"
             cur.execute(s, tuple(a))
             row = cur.fetchone()
