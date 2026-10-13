@@ -106,6 +106,9 @@ def _pg_sql(sql):
     s = sql
     s = s.replace("INSERT OR REPLACE INTO", "__UPSERT__")
     s = re.sub(r"\?", "%s", s)
+    # SQLite GROUP_CONCAT -> PostgreSQL STRING_AGG
+    s = re.sub(r"GROUP_CONCAT\(\s*([^,()]+?)\s*,\s*('[^']*')\s*\)", r"STRING_AGG(\1::text, \2)", s, flags=re.I)
+    s = re.sub(r"GROUP_CONCAT\(\s*([^,()]+?)\s*\)", r"STRING_AGG(\1::text, ',')", s, flags=re.I)
     if s.strip().startswith("__UPSERT__"):
         tabla = s.split("__UPSERT__", 1)[1].strip().split("(", 1)[0].strip()
         s = s.replace("__UPSERT__" + " " + tabla, f"INSERT INTO {tabla}") if ("__UPSERT__ " + tabla) in s else s.replace("__UPSERT__", "INSERT INTO")
@@ -756,7 +759,7 @@ def recordatorios():
 @need("odontologo", "recepcion")
 def reactivacion():
     lim = (dt.date.today() - dt.timedelta(days=180)).isoformat()
-    ps = q("""SELECT * FROM (SELECT p.*,(SELECT MAX(substr(fecha,1,10)) FROM citas c WHERE c.patient_id=p.id AND c.estado='atendida') ultima FROM patients p)
+    ps = q("""SELECT * FROM (SELECT p.*,(SELECT MAX(substr(fecha,1,10)) FROM citas c WHERE c.patient_id=p.id AND c.estado='atendida') ultima FROM patients p) t
               WHERE (ultima IS NULL AND creado<?) OR ultima<? ORDER BY ultima""", (lim, lim))
     return page("Reactivar", """<h1>Pacientes sin visita en 6 meses</h1><table><tr><th>Paciente<th>Última visita<th>Contactar</tr>{% for p in ps %}<tr><td>{{p.nombre}}<td>{{p.ultima or 'sin visitas'}}
 <td>{% set m='Hola '+p.nombre+', hace tiempo no nos visita. ¿Le agendamos su control en Dra. Natalia Morera Odontología?' %}{% if wa(p.telefono,m) %}<a class=btn href="{{wa(p.telefono,m)}}" target=_blank>WhatsApp</a>{% endif %}</tr>
