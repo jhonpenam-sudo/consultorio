@@ -1,9 +1,9 @@
 """Consultorio web - Dra. Natalia Morera. Ejecutar: pip install flask && python app.py
 Variables: SECRET_KEY, ADMIN_PASSWORD, DB_PATH, UPLOAD_DIR"""
-import os, sqlite3, datetime as dt, urllib.parse as up, time, shutil, re
+import os, sqlite3, datetime as dt, urllib.parse as up, time, shutil, re, json, urllib.request as urlreq
 from functools import wraps
 from flask import (Flask, g, request, redirect, session, render_template_string,
-                   flash, abort, send_from_directory)
+                   flash, abort, send_from_directory, Response)
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -16,6 +16,56 @@ USE_PG = bool(DATABASE_URL)
 if USE_PG:
     import psycopg2
     import psycopg2.extras
+
+# ---- Almacenamiento de archivos (logo, radiografias) en Supabase Storage, para que no se
+# borren con cada reinicio de Render. Si no esta configurado, se guarda localmente como antes. ----
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "archivos").strip()
+USE_SUPABASE_STORAGE = bool(SUPABASE_URL and SUPABASE_KEY)
+
+def _sb_headers(extra=None):
+    # Claves nuevas (sb_secret_...) van solo en apikey; claves antiguas (JWT, eyJ...) tambien en Authorization.
+    h = {"apikey": SUPABASE_KEY}
+    if not SUPABASE_KEY.startswith("sb_"):
+        h["Authorization"] = f"Bearer {SUPABASE_KEY}"
+    if extra:
+        h.update(extra)
+    return h
+
+def storage_guardar(nombre, datos_bytes, content_type="application/octet-stream"):
+    """Guarda un archivo. Si Supabase Storage esta configurado lo sube alla; si no, lo guarda en disco local (UPD)."""
+    if USE_SUPABASE_STORAGE:
+        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{nombre}"
+        req = urlreq.Request(url, data=datos_bytes, method="POST", headers=_sb_headers({"Content-Type": content_type, "x-upsert": "true"}))
+        try:
+            with urlreq.urlopen(req, timeout=20) as resp:
+                resp.read()
+            return True
+        except Exception as e:
+            print(f"Error subiendo a Supabase Storage: {e}")
+            return False
+    else:
+        with open(os.path.join(UPD, nombre), "wb") as fh:
+            fh.write(datos_bytes)
+        return True
+
+def storage_leer(nombre):
+    """Devuelve (bytes, encontrado) de un archivo, desde Supabase Storage o disco local segun corresponda."""
+    if USE_SUPABASE_STORAGE:
+        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{nombre}"
+        req = urlreq.Request(url, headers=_sb_headers())
+        try:
+            with urlreq.urlopen(req, timeout=20) as resp:
+                return resp.read(), True
+        except Exception:
+            return None, False
+    else:
+        ruta = os.path.join(UPD, nombre)
+        if os.path.exists(ruta):
+            with open(ruta, "rb") as fh:
+                return fh.read(), True
+        return None, False
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambiar-esta-clave")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
@@ -52,12 +102,10 @@ CREATE TABLE IF NOT EXISTS consentimientos(id INTEGER PRIMARY KEY AUTOINCREMENT,
 """
 
 def _pg_sql(sql):
-    # Traduce SQLite -> PostgreSQL: placeholders, funciones, tipos e INSERT OR REPLACE
+    # Traduce SQLite -> PostgreSQL: placeholders, tipos, e INSERT OR REPLACE
     s = sql
     s = s.replace("INSERT OR REPLACE INTO", "__UPSERT__")
     s = re.sub(r"\?", "%s", s)
-    # GROUP_CONCAT (SQLite) -> STRING_AGG (PostgreSQL)
-    s = re.sub(r"GROUP_CONCAT\(([^,()]+),\s*([^()]+)\)", r"STRING_AGG(\1, \2)", s)
     if s.strip().startswith("__UPSERT__"):
         tabla = s.split("__UPSERT__", 1)[1].strip().split("(", 1)[0].strip()
         s = s.replace("__UPSERT__" + " " + tabla, f"INSERT INTO {tabla}") if ("__UPSERT__ " + tabla) in s else s.replace("__UPSERT__", "INSERT INTO")
@@ -83,14 +131,9 @@ def q(sql, a=(), one=False):
     conn = db()
     if USE_PG:
         cur = conn.cursor()
-        try:
-            cur.execute(_pg_sql(sql), tuple(a))
-            r = cur.fetchall()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cur.close()
+        cur.execute(_pg_sql(sql), tuple(a))
+        r = cur.fetchall()
+        cur.close()
     else:
         r = conn.execute(sql, a).fetchall()
     return (r[0] if r else None) if one else r
@@ -99,25 +142,18 @@ def ex(sql, a=()):
     conn = db()
     if USE_PG:
         cur = conn.cursor()
-        try:
-            s = _pg_sql(sql)
-            # La tabla settings no tiene columna id, por eso no se le pide RETURNING id
-            quiere_id = (s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper()
-                         and not re.match(r"\s*INSERT\s+INTO\s+settings\b", s, re.I))
-            if quiere_id:
-                s = s.rstrip().rstrip(";") + " RETURNING id"
-                cur.execute(s, tuple(a))
-                row = cur.fetchone()
-                conn.commit()
-                return row["id"] if row else None
+        s = _pg_sql(sql)
+        if s.strip().upper().startswith("INSERT") and "RETURNING" not in s.upper():
+            s = s.rstrip().rstrip(";") + " RETURNING id"
             cur.execute(s, tuple(a))
+            row = cur.fetchone()
             conn.commit()
-            return None
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
             cur.close()
+            return row["id"] if row else None
+        cur.execute(s, tuple(a))
+        conn.commit()
+        cur.close()
+        return None
     else:
         c = conn.execute(sql, a); conn.commit(); return c.lastrowid
 
@@ -486,7 +522,7 @@ def paciente(pid):
 <td><form method=post action=/labs/{{l.id}}><select name=estado onchange=this.form.submit()>{% for e in ['enviado','en proceso','recibido','instalado'] %}<option {{'selected' if e==l.estado}}>{{e}}</option>{% endfor %}</select></form></tr>{% endfor %}</table>
 <form method=post action=/pacientes/{{p.id}}/lab class=row><input name=laboratorio placeholder=Laboratorio required><input name=trabajo placeholder=Trabajo required>
 <input name=entrega type=date title="Fecha de entrega"><button>Registrar envío</button></form>
-<h2>Recetas</h2><table><tr><th>Folio<th>Fecha<th>Diagnóstico<th>Medicamentos<th></tr>{% for r in recetas %}<tr><td>{{r.folio}}<td>{{r.fecha}}<td>{{r.diagnostico}}<td>{{r.resumen or ''}}<td><a href=/recetas/{{r.id}}>Ver / imprimir</a></tr>{% endfor %}</table>
+<h2>Recetas</h2><table><tr><th>Folio<th>Fecha<th>Diagnóstico<th>Medicamentos<th></tr>{% for r in recetas %}<tr><td>{{r.folio}}<td>{{r.fecha}}<td>{{r.diagnostico}}<td>{{r.resumen}}<td><a href=/recetas/{{r.id}}>Ver / imprimir</a></tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<p><a class=btn href=/pacientes/{{p.id}}/receta-nueva>Crear receta</a></p>{% endif %}
 <h2>Radiografías</h2><table><tr><th>Fecha<th>Descripción<th>Subida por<th></tr>{% for x in rx %}<tr><td>{{x.fecha}}<td>{{x.descripcion}}<td>{{x.subido_por}}<td><a href=/rx/{{x.archivo}}>Descargar</a></tr>{% endfor %}</table>
 <form method=post action=/pacientes/{{p.id}}/rx enctype=multipart/form-data class=row><input type=file name=archivo required><input name=descripcion placeholder=Descripción><button>Subir radiografía</button></form>
@@ -495,7 +531,7 @@ def paciente(pid):
 </div>
 <h2>Notas clínicas</h2><table><tr><th>Fecha<th>Usuario<th>Nota</tr>{% for n in notas %}<tr><td>{{n.fecha}}<td>{{n.usuario}}<td>{{n.texto}}</tr>{% else %}<tr><td colspan=3>Sin notas.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<form method=post action="/pacientes/{{p.id}}/notas" class=row><input name=texto placeholder="Escribir nota clínica" style="flex:1" required><button>Agregar nota</button></form>{% endif %}
-<h2>Cotizaciones</h2><table><tr><th>Fecha<th>Detalle<th>Total</tr>{% for c in cotizaciones %}<tr><td>{{c.fecha}}<td>{{c['items']}}<td>${{'{:,.0f}'.format(c.total or 0)}}</tr>{% else %}<tr><td colspan=3>Sin cotizaciones.</tr>{% endfor %}</table>
+<h2>Cotizaciones</h2><table><tr><th>Fecha<th>Detalle<th>Total</tr>{% for c in cotizaciones %}<tr><td>{{c.fecha}}<td>{{c.items}}<td>${{'{:,.0f}'.format(c.total or 0)}}</tr>{% else %}<tr><td colspan=3>Sin cotizaciones.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/cotizacion" class=row><input name=items placeholder="Detalle del tratamiento cotizado" style="flex:1" required><input name=total type=number step=1000 placeholder=Total required><button>Guardar cotización</button></form>{% endif %}
 <h2>Abonos y cartera</h2><table><tr><th>Fecha<th>Concepto<th>Monto</tr>{% for a in abonos %}<tr><td>{{a.fecha}}<td>{{a.concepto}}<td>${{'{:,.0f}'.format(a.monto or 0)}}</tr>{% else %}<tr><td colspan=3>Sin abonos registrados.</tr>{% endfor %}</table>
 <p>Total abonado: ${{'{:,.0f}'.format(total_abonos)}}</p>
@@ -596,7 +632,10 @@ def receta(i):
 def rx_add(pid):
     f = request.files["archivo"]
     name = f"{pid}_{dt.datetime.now():%Y%m%d%H%M%S}_{secure_filename(f.filename)}"
-    f.save(os.path.join(UPD, name))
+    ok_guardado = storage_guardar(name, f.read(), f.mimetype or "application/octet-stream")
+    if not ok_guardado:
+        flash("No se pudo guardar el archivo. Intenta de nuevo.")
+        return redirect(f"/pacientes/{pid}")
     ex("INSERT INTO rx(patient_id,archivo,descripcion,subido_por,fecha) VALUES(?,?,?,?,?)",
        (pid, name, request.form["descripcion"], session["u"], dt.date.today().isoformat()))
     audit("subir_rx", f"paciente {pid}: {name}")
@@ -606,12 +645,19 @@ def rx_add(pid):
 def logo():
     row = q("SELECT value FROM settings WHERE key='logo_file'", one=True)
     if not row or not row["value"]: abort(404)
-    return send_from_directory(UPD, row["value"])
+    datos, encontrado = storage_leer(row["value"])
+    if not encontrado: abort(404)
+    ext = os.path.splitext(row["value"])[1].lower()
+    tipos = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml", ".webp": "image/webp"}
+    return Response(datos, mimetype=tipos.get(ext, "application/octet-stream"))
 
 @app.route("/rx/<path:n>")
 @need("odontologo", "radiologo", "recepcion")
 def rx_get(n):
-    return send_from_directory(UPD, n, as_attachment=True)
+    datos, encontrado = storage_leer(n)
+    if not encontrado: abort(404)
+    return Response(datos, mimetype="application/octet-stream",
+                     headers={"Content-Disposition": f'attachment; filename="{n}"'})
 
 @app.post("/pacientes/<int:pid>/antecedentes")
 @need("odontologo", "admin", "recepcion")
@@ -708,8 +754,7 @@ def recordatorios():
 @need("odontologo", "recepcion")
 def reactivacion():
     lim = (dt.date.today() - dt.timedelta(days=180)).isoformat()
-    # PostgreSQL exige un alias en la subconsulta del FROM (por eso "t")
-    ps = q("""SELECT * FROM (SELECT p.*,(SELECT MAX(substr(fecha,1,10)) FROM citas c WHERE c.patient_id=p.id AND c.estado='atendida') AS ultima FROM patients p) t
+    ps = q("""SELECT * FROM (SELECT p.*,(SELECT MAX(substr(fecha,1,10)) FROM citas c WHERE c.patient_id=p.id AND c.estado='atendida') ultima FROM patients p)
               WHERE (ultima IS NULL AND creado<?) OR ultima<? ORDER BY ultima""", (lim, lim))
     return page("Reactivar", """<h1>Pacientes sin visita en 6 meses</h1><table><tr><th>Paciente<th>Última visita<th>Contactar</tr>{% for p in ps %}<tr><td>{{p.nombre}}<td>{{p.ultima or 'sin visitas'}}
 <td>{% set m='Hola '+p.nombre+', hace tiempo no nos visita. ¿Le agendamos su control en Dra. Natalia Morera Odontología?' %}{% if wa(p.telefono,m) %}<a class=btn href="{{wa(p.telefono,m)}}" target=_blank>WhatsApp</a>{% endif %}</tr>
@@ -888,7 +933,7 @@ def ventas():
 <input name=qty type=number value=1 min=1><select name=method><option value=efectivo>Efectivo</option><option value=tarjeta>Tarjeta</option><option value=transferencia>Transferencia</option></select>
 <button>Registrar venta</button></form>
 <h2>Últimas ventas</h2><table><tr><th>Fecha<th>Paciente<th>Detalle<th>Total<th>Método</tr>
-{% for v in ventas %}<tr><td>{{v.date}}<td>{{v.paciente or '—'}}<td>{{v['items']}}<td>${{'{:,.0f}'.format(v.total or 0)}}<td>{{v.method}}<td><a href="/einvoices/{{v.id}}">Factura DIAN</a></tr>
+{% for v in ventas %}<tr><td>{{v.date}}<td>{{v.paciente or '—'}}<td>{{v.items}}<td>${{'{:,.0f}'.format(v.total or 0)}}<td>{{v.method}}<td><a href="/einvoices/{{v.id}}">Factura DIAN</a></tr>
 {% else %}<tr><td colspan=5>No hay ventas registradas.</tr>{% endfor %}</table>""", ventas=ventas_rows, productos=productos_disp, pacientes=pacientes_disp)
 
 @app.route("/einvoices/<int:sale_id>")
@@ -1037,11 +1082,15 @@ def configuracion():
         logo = request.files.get("logo")
         if logo and logo.filename:
             ext = os.path.splitext(logo.filename)[1].lower()
-            if ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+            tipos = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml", ".webp": "image/webp"}
+            if ext in tipos:
                 nombre_logo = "logo" + ext
-                logo.save(os.path.join(UPD, nombre_logo))
-                ex("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("logo_file", nombre_logo))
-                flash("Logo actualizado.")
+                ok_guardado = storage_guardar(nombre_logo, logo.read(), tipos[ext])
+                if ok_guardado:
+                    ex("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("logo_file", nombre_logo))
+                    flash("Logo actualizado.")
+                else:
+                    flash("No se pudo guardar el logo. Intenta de nuevo.")
             else:
                 flash("Formato de logo no válido. Usa PNG, JPG, SVG o WEBP.")
         audit("configuracion", "actualizo datos del prestador")
@@ -1080,17 +1129,48 @@ def rips():
             audit("generar_rips", f"{desde} a {hasta}: {len(filas)} registros")
             archivo_generado = nombre
     lotes = q("SELECT * FROM rips_lotes ORDER BY id DESC LIMIT 15")
+    reps_listo = bool(os.environ.get("REPS_API_URL") and os.environ.get("REPS_TOKEN"))
     return page("Reporte RIPS", """<h1>Reporte RIPS para el Ministerio de Salud</h1>
 <p>Genera el archivo JSON con las atenciones del periodo, codificadas en CUPS y CIE-10, según la Resolución 948 de 2026.</p>
 <form method=post class=row><input type=date name=desde value="{{desde}}"><input type=date name=hasta value="{{hasta}}"><button>Generar RIPS del periodo</button></form>
 {% if faltantes %}<div class=msg style=color:#b00>No se generó el archivo. Estos pacientes no tienen documento o fecha de nacimiento completos: {{faltantes|join(', ')}}. Edítalos en su ficha antes de generar el RIPS.</div>{% endif %}
-{% if archivo %}<div class=msg>Archivo generado: {{archivo}}. <a href="/rips/descargar/{{archivo}}">Descargarlo</a></div>{% endif %}
+{% if archivo %}<div class=msg>Archivo generado: {{archivo}}. <a href="/rips/descargar/{{archivo}}">Descargarlo</a>
+{% if reps_listo %} · <form method=post action="/rips/enviar/{{archivo}}" style="display:inline"><button style="background:var(--bien)">Enviar al Ministerio</button></form>
+{% else %} · <span style="color:var(--mute)">Enviar al Ministerio (requiere credenciales REPS, ver Configuración)</span>{% endif %}</div>{% endif %}
 <h2>Atenciones en el periodo ({{filas|length}})</h2><table><tr><th>Fecha<th>Paciente<th>CUPS<th>CIE-10<th>Valor</tr>
 {% for a in filas %}<tr><td>{{a.fecha}}<td>{{a.nombre}}<td>{{a.cod_cups}}<td>{{a.cod_cie10}}<td>${{'{:,.0f}'.format(a.valor or 0)}}</tr>
 {% else %}<tr><td colspan=5>No hay atenciones registradas en este periodo.</tr>{% endfor %}</table>
 <h2>Reportes generados antes</h2><table><tr><th>Fecha<th>Periodo<th>Usuarios<th>Registros<th></tr>
-{% for l in lotes %}<tr><td>{{l.fecha}}<td>{{l.desde}} a {{l.hasta}}<td>{{l.n_usuarios}}<td>{{l.n_registros}}<td><a href="/rips/descargar/{{l.archivo}}">Descargar</a></tr>{% endfor %}</table>""",
-        desde=desde, hasta=hasta, filas=filas, archivo=archivo_generado, lotes=lotes, faltantes=faltantes)
+{% for l in lotes %}<tr><td>{{l.fecha}}<td>{{l.desde}} a {{l.hasta}}<td>{{l.n_usuarios}}<td>{{l.n_registros}}<td><a href="/rips/descargar/{{l.archivo}}">Descargar</a>
+{% if reps_listo %} · <form method=post action="/rips/enviar/{{l.archivo}}" style="display:inline"><button style="background:var(--bien);padding:4px 10px;font-size:12.5px">Enviar</button></form>{% endif %}</tr>{% endfor %}</table>
+{% if not reps_listo %}<div class=card style="font-size:13.5px;color:var(--mute)"><b>Envío automático al Ministerio:</b> todavía no está activo. Cuando tengas tu registro y credenciales como prestador (REPS), se configuran en Render como variables <code>REPS_API_URL</code> y <code>REPS_TOKEN</code>, y el botón "Enviar al Ministerio" aparecerá automáticamente aquí, sin tocar más código.</div>{% endif %}""",
+        desde=desde, hasta=hasta, filas=filas, archivo=archivo_generado, lotes=lotes, faltantes=faltantes, reps_listo=reps_listo)
+
+@app.post("/rips/enviar/<path:nombre>")
+@need("odontologo", "admin")
+def rips_enviar(nombre):
+    api_url = os.environ.get("REPS_API_URL")
+    token = os.environ.get("REPS_TOKEN")
+    if not (api_url and token):
+        flash("El envío automático todavía no está configurado. Agrega REPS_API_URL y REPS_TOKEN en Render cuando tengas tus credenciales del Ministerio.")
+        return redirect("/rips")
+    ruta = os.path.join(BASE, "rips_exportados", nombre)
+    if not os.path.exists(ruta):
+        flash("No se encontró ese archivo RIPS.")
+        return redirect("/rips")
+    try:
+        with open(ruta, "rb") as fh:
+            contenido = fh.read()
+        req = urlreq.Request(api_url, data=contenido, method="POST",
+                              headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
+        with urlreq.urlopen(req, timeout=30) as resp:
+            codigo = resp.status
+        audit("enviar_rips_ministerio", f"{nombre}: respuesta {codigo}")
+        flash(f"Archivo {nombre} enviado al Ministerio (respuesta {codigo}).")
+    except Exception as e:
+        audit("error_envio_rips", f"{nombre}: {e}")
+        flash(f"No se pudo enviar el archivo: {e}")
+    return redirect("/rips")
 
 @app.route("/rips/descargar/<path:n>")
 @need("odontologo", "admin")
@@ -1109,15 +1189,31 @@ def usuarios():
             try:
                 ex("INSERT INTO users(usuario,nombre,rol,clave) VALUES(?,?,?,?)", (f["usuario"].strip(), f["nombre"], f["rol"], generate_password_hash(f["clave"])))
                 audit("crear_usuario", f["usuario"].strip())
-            except Exception:
-                # SQLite lanza sqlite3.IntegrityError y PostgreSQL psycopg2.IntegrityError (usuario repetido)
-                flash("Ese usuario ya existe.")
-    return page("Usuarios", """<h1>Usuarios</h1><table><tr><th>Usuario<th>Nombre<th>Rol</tr>{% for u in us %}<tr><td>{{u.usuario}}<td>{{u.nombre}}<td>{{u.rol}}</tr>{% endfor %}</table>
+            except sqlite3.IntegrityError: flash("Ese usuario ya existe.")
+    return page("Usuarios", """<h1>Usuarios</h1><table><tr><th>Usuario<th>Nombre<th>Rol<th></tr>{% for u in us %}<tr><td>{{u.usuario}}<td>{{u.nombre}}<td>{{u.rol}}
+<td>{% if u.usuario != session.u %}<form method=post action="/usuarios/{{u.id}}/eliminar" onsubmit="return confirm('¿Eliminar al usuario {{u.usuario}}? Esta acción no se puede deshacer.')" style="margin:0">
+<button style="background:var(--mal);padding:5px 10px;font-size:12.5px">Eliminar</button></form>{% else %}<span style="color:var(--mute);font-size:12.5px">Tu usuario actual</span>{% endif %}</tr>{% endfor %}</table>
 <h2>Nuevo usuario</h2><form method=post class=row><input name=usuario placeholder=Usuario required><input name=nombre placeholder=Nombre>
 <input name=clave type=password placeholder="Contraseña (mínimo 8, letras y números)" required><select name=rol>{% for r in roles %}<option>{{r}}</option>{% endfor %}</select>
 <button>Crear usuario</button></form><h2>Auditoría reciente</h2><table><tr><th>Fecha<th>Usuario<th>Acción<th>Detalle</tr>
 {% for a in aud %}<tr><td>{{a.fecha}}<td>{{a.usuario}}<td>{{a.accion}}<td>{{a.detalle}}</tr>{% endfor %}</table>""",
         us=q("SELECT * FROM users"), roles=ROLES, aud=q("SELECT * FROM auditoria ORDER BY id DESC LIMIT 50"))
+
+@app.post("/usuarios/<int:uid>/eliminar")
+@need()
+def usuario_eliminar(uid):
+    if session["rol"] != "admin": abort(403)
+    objetivo = q("SELECT * FROM users WHERE id=?", (uid,), one=True)
+    if not objetivo:
+        flash("Ese usuario no existe.")
+        return redirect("/usuarios")
+    if objetivo["usuario"] == session["u"]:
+        flash("No puedes eliminar tu propio usuario mientras tienes la sesión abierta.")
+        return redirect("/usuarios")
+    ex("DELETE FROM users WHERE id=?", (uid,))
+    audit("eliminar_usuario", objetivo["usuario"])
+    flash(f"Usuario {objetivo['usuario']} eliminado.")
+    return redirect("/usuarios")
 
 init()
 if not USE_PG:
