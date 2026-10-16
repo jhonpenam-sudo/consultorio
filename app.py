@@ -1,6 +1,7 @@
 """Consultorio web - Dra. Natalia Morera. Ejecutar: pip install flask && python app.py
 Variables: SECRET_KEY, ADMIN_PASSWORD, DB_PATH, UPLOAD_DIR"""
-import os, sqlite3, datetime as dt, urllib.parse as up, time, shutil, re, json, urllib.request as urlreq
+import os, sqlite3, datetime as dt, urllib.parse as up, time, shutil, re, json, urllib.request as urlreq, calendar, smtplib
+from email.mime.text import MIMEText
 from functools import wraps
 from flask import (Flask, g, request, redirect, session, render_template_string,
                    flash, abort, send_from_directory, Response)
@@ -49,6 +50,47 @@ def storage_guardar(nombre, datos_bytes, content_type="application/octet-stream"
         with open(os.path.join(UPD, nombre), "wb") as fh:
             fh.write(datos_bytes)
         return True
+
+def storage_borrar(nombre):
+    """Borra un archivo (Supabase Storage o disco local). Si falla, se ignora."""
+    try:
+        if USE_SUPABASE_STORAGE:
+            req = urlreq.Request(f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{nombre}",
+                                 method="DELETE", headers=_sb_headers())
+            urlreq.urlopen(req, timeout=20).read()
+        else:
+            ruta = os.path.join(UPD, nombre)
+            if os.path.exists(ruta): os.remove(ruta)
+    except Exception as e:
+        print(f"No se pudo borrar archivo {nombre}: {e}")
+
+# ---- Envio de correo (recordatorios de citas) via SMTP. Gratis si usas tu propio correo
+# (ej. Gmail con "contraseña de aplicación"). Se activa poniendo estas variables en Render. ----
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587") or 587)
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Dra. Natalia Morera Odontología Especializada").strip()
+EMAIL_LISTO = bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
+
+def enviar_correo(destinatario, asunto, cuerpo):
+    """Envia un correo simple de texto plano. Devuelve (ok, mensaje_error)."""
+    if not EMAIL_LISTO:
+        return False, "El envío de correo no está configurado (faltan SMTP_HOST / SMTP_USER / SMTP_PASS)."
+    if not destinatario:
+        return False, "El paciente no tiene correo registrado."
+    try:
+        msg = MIMEText(cuerpo, "plain", "utf-8")
+        msg["Subject"] = asunto
+        msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+        msg["To"] = destinatario
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, [destinatario], msg.as_string())
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 def storage_leer(nombre):
     """Devuelve (bytes, encontrado) de un archivo, desde Supabase Storage o disco local segun corresponda."""
@@ -99,6 +141,9 @@ CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_i
 CREATE TABLE IF NOT EXISTS quotes(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, items TEXT, total REAL, usuario TEXT);
 CREATE TABLE IF NOT EXISTS abonos(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, monto REAL, concepto TEXT, usuario TEXT);
 CREATE TABLE IF NOT EXISTS consentimientos(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, procedimiento TEXT, texto TEXT, firmado_por TEXT, usuario TEXT);
+CREATE TABLE IF NOT EXISTS cuentas(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, plan_id INTEGER, fecha TEXT, descripcion TEXT, total REAL, abonado REAL DEFAULT 0, fecha_vence TEXT, estado TEXT DEFAULT 'abierta');
+CREATE TABLE IF NOT EXISTS documentos(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, archivo TEXT, nombre_original TEXT, descripcion TEXT, subido_por TEXT, fecha TEXT);
+CREATE TABLE IF NOT EXISTS informes(id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER, fecha TEXT, titulo TEXT, contenido TEXT, autor TEXT, folio TEXT);
 """
 
 def _pg_sql(sql):
@@ -189,6 +234,8 @@ def init():
             cur.execute("ALTER TABLE patients ADD COLUMN alergias TEXT")
         if "antecedentes" not in pcols:
             cur.execute("ALTER TABLE patients ADD COLUMN antecedentes TEXT")
+        if "foto" not in pcols:
+            cur.execute("ALTER TABLE patients ADD COLUMN foto TEXT")
         cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='citas'")
         ccols = [r[0] for r in cur.fetchall()]
         if "dentist_id" not in ccols:
@@ -216,6 +263,8 @@ def init():
             c.execute("ALTER TABLE patients ADD COLUMN alergias TEXT")
         if "antecedentes" not in pcols:
             c.execute("ALTER TABLE patients ADD COLUMN antecedentes TEXT")
+        if "foto" not in pcols:
+            c.execute("ALTER TABLE patients ADD COLUMN foto TEXT")
         ccols = [r[1] for r in c.execute("PRAGMA table_info(citas)").fetchall()]
         if "dentist_id" not in ccols:
             c.execute("ALTER TABLE citas ADD COLUMN dentist_id INTEGER")
@@ -481,13 +530,22 @@ def pacientes():
         else:
             pid = ex("INSERT INTO patients(nombre,documento,tipo_doc,fecha_nac,sexo,telefono,email,creado) VALUES(?,?,?,?,?,?,?,?)",
                      (f["nombre"].strip(), f["documento"], f.get("tipo_doc","CC"), f.get("fecha_nac") or None, f.get("sexo","F"), f["telefono"], f["email"], dt.date.today().isoformat()))
+            foto = request.files.get("foto")
+            if foto and foto.filename:
+                ext = os.path.splitext(foto.filename)[1].lower()
+                tipos_foto = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+                if ext in tipos_foto:
+                    nombre_foto = f"foto_paciente_{pid}{ext}"
+                    if storage_guardar(nombre_foto, foto.read(), tipos_foto[ext]):
+                        ex("UPDATE patients SET foto=? WHERE id=?", (nombre_foto, pid))
             audit("crear_paciente", f["nombre"].strip())
             return redirect(f"/pacientes/{pid}")
     s = "%" + request.args.get("s", "") + "%"
     ps = q("SELECT * FROM patients WHERE nombre LIKE ? OR documento LIKE ? ORDER BY nombre", (s, s))
     return page("Pacientes", """<h1>Pacientes</h1><form class=row><input name=s placeholder="Buscar nombre o documento" value="{{request.args.s}}"><button>Buscar</button></form>
 <table><tr><th>Nombre<th>Documento<th>Teléfono</tr>{% for p in ps %}<tr><td><a href=/pacientes/{{p.id}}>{{p.nombre}}</a><td>{{p.documento}}<td>{{p.telefono}}</tr>{% endfor %}</table>
-<h2>Nuevo paciente</h2><form method=post class=row><input name=nombre placeholder=Nombre required>
+<h2>Nuevo paciente</h2><form method=post class=row enctype="multipart/form-data"><input name=nombre placeholder=Nombre required>
+<input type=file name=foto accept="image/png,image/jpeg,image/webp" title="Fotografía del paciente (opcional)">
 <select name=tipo_doc><option value=CC>Cédula</option><option value=TI>Tarjeta de identidad</option><option value=RC>Registro civil</option><option value=CE>Cédula extranjería</option><option value=PA>Pasaporte</option></select>
 <input name=documento placeholder=Documento><input name=fecha_nac type=date title="Fecha de nacimiento">
 <select name=sexo><option value=F>Femenino</option><option value=M>Masculino</option></select>
@@ -505,7 +563,17 @@ def paciente(pid):
             plan_g[-1][1].append(x)
         else:
             plan_g.append([x["etapa"] or "Sin etapa", [x]])
-    return page(p["nombre"], """<h1>{{p.nombre}}</h1><p>{{p.documento}} · {{p.telefono}} · {{p.email}}</p>
+    return page(p["nombre"], """<div class=row style="justify-content:space-between;align-items:flex-start">
+<div class=row style="align-items:flex-start">
+{% if p.foto %}<img src="/foto/{{p.id}}" style="width:84px;height:84px;object-fit:cover;border-radius:10px;border:1px solid #e2e8f0">
+{% else %}<div style="width:84px;height:84px;border-radius:10px;background:#eef2f7;display:flex;align-items:center;justify-content:center;color:var(--mute);font-size:12px;text-align:center">Sin foto</div>{% endif %}
+<div><h1 style="margin-bottom:4px">{{p.nombre}}</h1><p>{{p.documento}} · {{p.telefono}} · {{p.email}}</p>
+{% if session.rol in ['admin','recepcion','odontologo'] %}<form method=post action="/pacientes/{{p.id}}/foto" enctype="multipart/form-data" class=row style="margin-top:4px">
+<input type=file name=foto accept="image/png,image/jpeg,image/webp" style="font-size:12px"><button style="padding:4px 10px;font-size:12px">{{'Cambiar foto' if p.foto else 'Subir foto'}}</button></form>{% endif %}</div>
+</div>
+{% if session.rol in ['admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/eliminar" onsubmit="return confirm('¿Eliminar al paciente {{p.nombre}}? Se borrará toda su información: historia, plan, odontograma, citas, pagos y radiografías. Esta acción no se puede deshacer.')">
+<button style="background:var(--mal);padding:7px 14px;font-size:13px">Eliminar paciente</button></form>{% endif %}
+</div>
 {% if p.alergias %}<div class=msg style="background:#fee2e2;border-left-color:var(--mal)"><b>⚠ Alergias:</b> {{p.alergias}}</div>{% endif %}
 <div class=card>
 <h2 style="margin-top:0">Antecedentes médicos</h2>
@@ -529,8 +597,14 @@ def paciente(pid):
 <input name=entrega type=date title="Fecha de entrega"><button>Registrar envío</button></form>
 <h2>Recetas</h2><table><tr><th>Folio<th>Fecha<th>Diagnóstico<th>Medicamentos<th></tr>{% for r in recetas %}<tr><td>{{r.folio}}<td>{{r.fecha}}<td>{{r.diagnostico}}<td>{{r.resumen}}<td><a href=/recetas/{{r.id}}>Ver / imprimir</a></tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<p><a class=btn href=/pacientes/{{p.id}}/receta-nueva>Crear receta</a></p>{% endif %}
+<h2>Informes médicos</h2><table><tr><th>Folio<th>Fecha<th>Título<th></tr>{% for inf in informes %}<tr><td>{{inf.folio}}<td>{{inf.fecha}}<td>{{inf.titulo}}<td><a href=/informes/{{inf.id}}>Ver / imprimir</a></tr>{% else %}<tr><td colspan=4>Sin informes registrados.</tr>{% endfor %}</table>
+{% if session.rol in ['odontologo','admin'] %}<p><a class=btn href=/pacientes/{{p.id}}/informe-nuevo>Crear informe</a></p>{% endif %}
 <h2>Radiografías</h2><table><tr><th>Fecha<th>Descripción<th>Subida por<th></tr>{% for x in rx %}<tr><td>{{x.fecha}}<td>{{x.descripcion}}<td>{{x.subido_por}}<td><a href=/rx/{{x.archivo}}>Descargar</a></tr>{% endfor %}</table>
 <form method=post action=/pacientes/{{p.id}}/rx enctype=multipart/form-data class=row><input type=file name=archivo required><input name=descripcion placeholder=Descripción><button>Subir radiografía</button></form>
+<h2>Documentos</h2><table><tr><th>Fecha<th>Archivo<th>Descripción<th>Subido por<th></tr>{% for d in documentos %}<tr><td>{{d.fecha}}<td>{{d.nombre_original}}<td>{{d.descripcion or '-'}}<td>{{d.subido_por}}
+<td><a href=/documentos/{{d.archivo}}>Descargar</a> <form method=post action="/documentos/{{d.id}}/eliminar" onsubmit="return confirm('¿Eliminar este documento?')" style="display:inline;margin:0"><button style="background:var(--mal);padding:3px 8px;font-size:12px">Eliminar</button></form></tr>
+{% else %}<tr><td colspan=5>Sin documentos adjuntos.</tr>{% endfor %}</table>
+<form method=post action=/pacientes/{{p.id}}/documento enctype=multipart/form-data class=row><input type=file name=archivo required><input name=descripcion placeholder="Descripción (ej: consentimiento firmado, orden médica)" style="flex:1"><button>Subir documento</button></form>
 <div class=card style="text-align:center;background:linear-gradient(135deg,#2563eb,#1e3a8a)">
 <a href="/pacientes/{{p.id}}/odontograma" style="color:#fff;text-decoration:none;font-size:18px;font-weight:700">🦷 Ver odontograma gráfico</a>
 </div>
@@ -538,9 +612,19 @@ def paciente(pid):
 {% if session.rol in ['odontologo','admin'] %}<form method=post action="/pacientes/{{p.id}}/notas" class=row><input name=texto placeholder="Escribir nota clínica" style="flex:1" required><button>Agregar nota</button></form>{% endif %}
 <h2>Cotizaciones</h2><table><tr><th>Fecha<th>Detalle<th>Total</tr>{% for c in cotizaciones %}<tr><td>{{c.fecha}}<td>{{c.items}}<td>${{'{:,.0f}'.format(c.total or 0)}}</tr>{% else %}<tr><td colspan=3>Sin cotizaciones.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/cotizacion" class=row><input name=items placeholder="Detalle del tratamiento cotizado" style="flex:1" required><input name=total type=number step=1000 placeholder=Total required><button>Guardar cotización</button></form>{% endif %}
+<h2>Cuentas por cobrar</h2><table><tr><th>Fecha<th>Descripción<th>Total<th>Abonado<th>Saldo<th>Vence<th>Estado<th>Acción</tr>
+{% for cu in cuentas %}<tr{% if cu.estado=='abierta' and cu.fecha_vence and cu.fecha_vence < hoy_iso %} style="background:#fee2e2"{% endif %}>
+<td>{{cu.fecha}}<td>{{cu.descripcion}}<td>${{'{:,.0f}'.format(cu.total or 0)}}<td>${{'{:,.0f}'.format(cu.abonado or 0)}}<td>${{'{:,.0f}'.format((cu.total or 0)-(cu.abonado or 0))}}
+<td>{{cu.fecha_vence or '-'}}{% if cu.estado=='abierta' and cu.fecha_vence and cu.fecha_vence < hoy_iso %} <b style="color:var(--mal)">¡Vencida!</b>{% endif %}
+<td>{{cu.estado}}<td>{% if cu.estado=='pagada' and session.rol in ['admin','recepcion'] %}<form method=post action="/cuentas/{{cu.id}}/facturar" style="margin:0"><button style="padding:4px 8px;font-size:12px">Facturar</button></form>{% endif %}</tr>
+{% else %}<tr><td colspan=8>Sin cuentas por cobrar.</tr>{% endfor %}</table>
+<p>Saldo total pendiente: ${{'{:,.0f}'.format(saldo_total)}}</p>
+
 <h2>Abonos y cartera</h2><table><tr><th>Fecha<th>Concepto<th>Monto</tr>{% for a in abonos %}<tr><td>{{a.fecha}}<td>{{a.concepto}}<td>${{'{:,.0f}'.format(a.monto or 0)}}</tr>{% else %}<tr><td colspan=3>Sin abonos registrados.</tr>{% endfor %}</table>
 <p>Total abonado: ${{'{:,.0f}'.format(total_abonos)}}</p>
-{% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/abono" class=row><input name=concepto placeholder=Concepto required><input name=monto type=number step=1000 placeholder=Monto required><button>Registrar abono</button></form>{% endif %}
+{% if session.rol in ['odontologo','admin','recepcion'] %}<form method=post action="/pacientes/{{p.id}}/abono" class=row><input name=concepto placeholder=Concepto required><input name=monto type=number step=1000 placeholder=Monto required>
+<select name=cuenta_id><option value="">Sin asociar a cuenta</option>{% for cu in cuentas %}{% if cu.estado=='abierta' %}<option value="{{cu.id}}">{{cu.descripcion}} (saldo ${{'{:,.0f}'.format((cu.total or 0)-(cu.abonado or 0))}})</option>{% endif %}{% endfor %}</select>
+<button>Registrar abono</button></form>{% endif %}
 <h2>Consentimientos informados</h2><table><tr><th>Fecha<th>Procedimiento<th>Firmado por<th>Registrado por</tr>
 {% for c in consentimientos %}<tr><td>{{c.fecha}}<td>{{c.procedimiento}}<td>{{c.firmado_por}}<td>{{c.usuario}}</tr>{% else %}<tr><td colspan=4>Sin consentimientos registrados.</tr>{% endfor %}</table>
 {% if session.rol in ['odontologo','admin'] %}<form method=post action="/pacientes/{{p.id}}/consentimiento" class=row style="flex-direction:column;align-items:stretch">
@@ -565,14 +649,24 @@ def paciente(pid):
         cotizaciones=q("SELECT * FROM quotes WHERE patient_id=? ORDER BY id DESC", (pid,)),
         abonos=q("SELECT * FROM abonos WHERE patient_id=? ORDER BY id DESC", (pid,)),
         total_abonos=sum(a["monto"] or 0 for a in q("SELECT * FROM abonos WHERE patient_id=?", (pid,))),
-        consentimientos=q("SELECT * FROM consentimientos WHERE patient_id=? ORDER BY id DESC", (pid,)))
+        consentimientos=q("SELECT * FROM consentimientos WHERE patient_id=? ORDER BY id DESC", (pid,)),
+        cuentas=q("SELECT * FROM cuentas WHERE patient_id=? ORDER BY id DESC", (pid,)),
+        saldo_total=sum((x["total"] or 0) - (x["abonado"] or 0) for x in q("SELECT * FROM cuentas WHERE patient_id=? AND estado='abierta'", (pid,))),
+        hoy_iso=dt.date.today().isoformat(),
+        documentos=q("SELECT * FROM documentos WHERE patient_id=? ORDER BY id DESC", (pid,)),
+        informes=q("SELECT * FROM informes WHERE patient_id=? ORDER BY id DESC", (pid,)))
 
 @app.post("/pacientes/<int:pid>/plan")
 @need("odontologo")
 def plan_add(pid):
     f = request.form
-    ex("INSERT INTO plan(patient_id,diente,tratamiento,etapa,costo,fecha_prog) VALUES(?,?,?,?,?,?)",
-       (pid, f["diente"], f["tratamiento"], f.get("etapa") or "Sin etapa", float(f["costo"] or 0), f.get("fecha_prog") or None))
+    costo = float(f["costo"] or 0)
+    plan_id = ex("INSERT INTO plan(patient_id,diente,tratamiento,etapa,costo,fecha_prog) VALUES(?,?,?,?,?,?)",
+       (pid, f["diente"], f["tratamiento"], f.get("etapa") or "Sin etapa", costo, f.get("fecha_prog") or None))
+    if costo > 0:
+        vence = (dt.date.today() + dt.timedelta(days=30)).isoformat()
+        ex("INSERT INTO cuentas(patient_id,plan_id,fecha,descripcion,total,abonado,fecha_vence,estado) VALUES(?,?,?,?,?,0,?,'abierta')",
+           (pid, plan_id, dt.date.today().isoformat(), f["tratamiento"], costo, vence))
     return redirect(f"/pacientes/{pid}")
 
 @app.post("/plan/<int:i>")
@@ -632,6 +726,31 @@ def receta(i):
 {% for x in items %}<tr><td>{{x.medicamento}}<td>{{x.dosis}}<td>{{x.via}}<td>{{x.frecuencia}}<td>{{x.duracion}}<td>{{x.indicaciones}}</tr>{% endfor %}</table>
 <p>Prescrito por: {{r.autor}}<br>Firma y registro profesional: ____________________</p><button class=noprint onclick=print()>Imprimir</button>""", r=r, items=items)
 
+@app.route("/pacientes/<int:pid>/informe-nuevo", methods=["GET", "POST"])
+@need("odontologo")
+def informe_nuevo(pid):
+    p = q("SELECT * FROM patients WHERE id=?", (pid,), one=True) or abort(404)
+    if request.method == "POST":
+        f = request.form
+        folio = f"INF-{dt.datetime.now():%Y%m%d%H%M%S}"
+        iid = ex("INSERT INTO informes(patient_id,fecha,titulo,contenido,autor,folio) VALUES(?,?,?,?,?,?)",
+                 (pid, dt.date.today().isoformat(), f.get("titulo", "").strip() or "Informe médico", f.get("contenido", "").strip(), session["u"], folio))
+        audit("crear_informe", f"paciente {pid} folio {folio}")
+        return redirect(f"/informes/{iid}")
+    return page("Nuevo informe", """<h1>Nuevo informe médico - {{p.nombre}}</h1>
+<form method=post><p><input name=titulo placeholder="Título (ej: Informe de evolución, Remisión, Concepto odontológico)" size=50 required></p>
+<p><textarea name=contenido rows=10 style="width:100%" placeholder="Contenido del informe" required></textarea></p>
+<button>Guardar informe</button></form>""", p=p)
+
+@app.route("/informes/<int:i>")
+@need("odontologo", "recepcion")
+def informe(i):
+    r = q("SELECT inf.*,p.nombre,p.documento FROM informes inf JOIN patients p ON p.id=inf.patient_id WHERE inf.id=?", (i,), one=True) or abort(404)
+    return page("Informe", """<h1>{{r.titulo}}</h1><p>Dra. Natalia Morera Odontología Especializada<br>Folio: {{r.folio}} · Fecha: {{r.fecha}}</p>
+<p><b>Paciente:</b> {{r.nombre}} ({{r.documento}})</p>
+<p style="white-space:pre-wrap">{{r.contenido}}</p>
+<p>Elaborado por: {{r.autor}}<br>Firma y registro profesional: ____________________</p><button class=noprint onclick=print()>Imprimir</button>""", r=r)
+
 @app.post("/pacientes/<int:pid>/rx")
 @need("odontologo", "radiologo")
 def rx_add(pid):
@@ -656,6 +775,35 @@ def logo():
     tipos = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml", ".webp": "image/webp"}
     return Response(datos, mimetype=tipos.get(ext, "application/octet-stream"))
 
+@app.route("/foto/<int:pid>")
+@need("odontologo", "admin", "recepcion", "radiologo")
+def foto_paciente(pid):
+    p = q("SELECT foto FROM patients WHERE id=?", (pid,), one=True)
+    if not p or not p["foto"]: abort(404)
+    datos, encontrado = storage_leer(p["foto"])
+    if not encontrado: abort(404)
+    ext = os.path.splitext(p["foto"])[1].lower()
+    tipos = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+    return Response(datos, mimetype=tipos.get(ext, "application/octet-stream"))
+
+@app.post("/pacientes/<int:pid>/foto")
+@need("odontologo", "admin", "recepcion")
+def foto_paciente_actualizar(pid):
+    foto = request.files.get("foto")
+    if foto and foto.filename:
+        ext = os.path.splitext(foto.filename)[1].lower()
+        tipos_foto = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+        if ext in tipos_foto:
+            nombre_foto = f"foto_paciente_{pid}{ext}"
+            if storage_guardar(nombre_foto, foto.read(), tipos_foto[ext]):
+                ex("UPDATE patients SET foto=? WHERE id=?", (nombre_foto, pid))
+                flash("Fotografía actualizada.")
+            else:
+                flash("No se pudo guardar la fotografía.")
+        else:
+            flash("Formato de imagen no válido. Usa PNG, JPG o WEBP.")
+    return redirect(f"/pacientes/{pid}")
+
 @app.route("/rx/<path:n>")
 @need("odontologo", "radiologo", "recepcion")
 def rx_get(n):
@@ -663,6 +811,62 @@ def rx_get(n):
     if not encontrado: abort(404)
     return Response(datos, mimetype="application/octet-stream",
                      headers={"Content-Disposition": f'attachment; filename="{n}"'})
+
+@app.post("/pacientes/<int:pid>/documento")
+@need("odontologo", "admin", "recepcion")
+def documento_add(pid):
+    f = request.files.get("archivo")
+    if not f or not f.filename:
+        flash("Selecciona un archivo.")
+        return redirect(f"/pacientes/{pid}")
+    nombre = f"doc_{pid}_{dt.datetime.now():%Y%m%d%H%M%S}_{secure_filename(f.filename)}"
+    if not storage_guardar(nombre, f.read(), f.mimetype or "application/octet-stream"):
+        flash("No se pudo guardar el documento. Intenta de nuevo.")
+        return redirect(f"/pacientes/{pid}")
+    ex("INSERT INTO documentos(patient_id,archivo,nombre_original,descripcion,subido_por,fecha) VALUES(?,?,?,?,?,?)",
+       (pid, nombre, f.filename, request.form.get("descripcion", "").strip(), session["u"], dt.date.today().isoformat()))
+    audit("subir_documento", f"paciente {pid}: {f.filename}")
+    return redirect(f"/pacientes/{pid}")
+
+@app.route("/documentos/<path:n>")
+@need("odontologo", "admin", "recepcion", "radiologo")
+def documento_get(n):
+    fila = q("SELECT nombre_original FROM documentos WHERE archivo=?", (n,), one=True)
+    nombre_descarga = fila["nombre_original"] if fila else n
+    datos, encontrado = storage_leer(n)
+    if not encontrado: abort(404)
+    return Response(datos, mimetype="application/octet-stream",
+                     headers={"Content-Disposition": f'attachment; filename="{nombre_descarga}"'})
+
+@app.post("/documentos/<int:did>/eliminar")
+@need("odontologo", "admin", "recepcion")
+def documento_eliminar(did):
+    doc = q("SELECT * FROM documentos WHERE id=?", (did,), one=True) or abort(404)
+    storage_borrar(doc["archivo"])
+    ex("DELETE FROM documentos WHERE id=?", (did,))
+    audit("eliminar_documento", f"paciente {doc['patient_id']}: {doc['nombre_original']}")
+    return redirect(f"/pacientes/{doc['patient_id']}")
+
+@app.post("/pacientes/<int:pid>/eliminar")
+@need("admin", "recepcion")
+def paciente_eliminar(pid):
+    p = q("SELECT * FROM patients WHERE id=?", (pid,), one=True) or abort(404)
+    for r in q("SELECT archivo FROM rx WHERE patient_id=?", (pid,)):
+        storage_borrar(r["archivo"])
+    for d in q("SELECT archivo FROM documentos WHERE patient_id=?", (pid,)):
+        storage_borrar(d["archivo"])
+    if p["foto"]:
+        storage_borrar(p["foto"])
+    ex("DELETE FROM receta_items WHERE receta_id IN (SELECT id FROM recetas WHERE patient_id=?)", (pid,))
+    for t in ("citas", "plan", "labs", "recetas", "rx", "atenciones", "notes", "quotes", "abonos", "consentimientos", "cuentas", "documentos", "informes"):
+        ex(f"DELETE FROM {t} WHERE patient_id=?", (pid,))
+    # Ventas y movimientos de caja se conservan (contabilidad), solo se desvinculan del paciente
+    ex("UPDATE sales SET patient_id=NULL WHERE patient_id=?", (pid,))
+    ex("UPDATE caja_mov SET patient_id=NULL WHERE patient_id=?", (pid,))
+    ex("DELETE FROM patients WHERE id=?", (pid,))
+    audit("eliminar_paciente", f"{p['nombre']} (id {pid})")
+    flash(f"Paciente {p['nombre']} eliminado.")
+    return redirect("/pacientes")
 
 @app.post("/pacientes/<int:pid>/antecedentes")
 @need("odontologo", "admin", "recepcion")
@@ -695,10 +899,26 @@ def cotizacion_add(pid):
 @need("odontologo", "admin", "recepcion")
 def abono_add(pid):
     f = request.form
+    monto = float(f["monto"] or 0)
     ex("INSERT INTO abonos(patient_id,fecha,monto,concepto,usuario) VALUES(?,?,?,?,?)",
-       (pid, dt.date.today().isoformat(), float(f["monto"] or 0), f["concepto"].strip(), session["u"]))
+       (pid, dt.date.today().isoformat(), monto, f["concepto"].strip(), session["u"]))
+    cuenta_id = f.get("cuenta_id")
+    if cuenta_id:
+        cu = q("SELECT * FROM cuentas WHERE id=?", (cuenta_id,), one=True)
+        if cu:
+            nuevo_abonado = (cu["abonado"] or 0) + monto
+            nuevo_estado = "pagada" if nuevo_abonado >= (cu["total"] or 0) else "abierta"
+            ex("UPDATE cuentas SET abonado=?, estado=? WHERE id=?", (nuevo_abonado, nuevo_estado, cuenta_id))
     audit("abono", f"paciente {pid}: {f['concepto']}")
     return redirect(f"/pacientes/{pid}")
+
+@app.post("/cuentas/<int:cid>/facturar")
+@need("admin", "recepcion")
+def cuenta_facturar(cid):
+    cu = q("SELECT * FROM cuentas WHERE id=?", (cid,), one=True) or abort(404)
+    ex("UPDATE cuentas SET estado='facturada' WHERE id=?", (cid,))
+    audit("cuenta_facturada", f"cuenta {cid}, paciente {cu['patient_id']}")
+    return redirect(f"/pacientes/{cu['patient_id']}")
 
 @app.post("/pacientes/<int:pid>/consentimiento")
 @need("odontologo", "admin")
@@ -732,7 +952,62 @@ def citas():
            (f["patient_id"], f["fecha"].replace("T", " "), f["motivo"], f.get("dentist_id") or None))
     cs = q("""SELECT c.*,p.nombre,d.name dentist_name FROM citas c LEFT JOIN patients p ON p.id=c.patient_id
               LEFT JOIN dentists d ON d.id=c.dentist_id ORDER BY fecha DESC LIMIT 100""")
-    return page("Citas", """<h1>Citas</h1><table><tr><th>Fecha<th>Paciente<th>Odontólogo<th>Motivo<th>Estado<th></tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.nombre or c.nombre_libre}} {{c.telefono_libre or ''}}
+
+    hoy = dt.date.today()
+    try:
+        anio = int(request.args.get("anio", hoy.year))
+        mes = int(request.args.get("mes", hoy.month))
+    except ValueError:
+        anio, mes = hoy.year, hoy.month
+    mes_ant = (anio, mes - 1) if mes > 1 else (anio - 1, 12)
+    mes_sig = (anio, mes + 1) if mes < 12 else (anio + 1, 1)
+    nombres_mes = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+
+    ym = f"{anio:04d}-{mes:02d}"
+    citas_mes = q("""SELECT c.*,COALESCE(p.nombre,c.nombre_libre) nombre FROM citas c LEFT JOIN patients p ON p.id=c.patient_id
+                     WHERE c.fecha LIKE ? ORDER BY c.fecha""", (ym + "%",))
+    por_dia = {}
+    for cc in citas_mes:
+        dia = int(cc["fecha"][8:10])
+        por_dia.setdefault(dia, []).append(cc)
+
+    primer_dia, num_dias = calendar.monthrange(anio, mes)
+    semanas = []
+    semana = [None] * primer_dia
+    for d in range(1, num_dias + 1):
+        semana.append(d)
+        if len(semana) == 7:
+            semanas.append(semana); semana = []
+    if semana:
+        semana += [None] * (7 - len(semana))
+        semanas.append(semana)
+
+    celdas_html = ""
+    for semana in semanas:
+        celdas_html += "<tr>"
+        for d in semana:
+            if d is None:
+                celdas_html += "<td style='background:#f8fafc'></td>"
+                continue
+            es_hoy = (d == hoy.day and mes == hoy.month and anio == hoy.year)
+            citas_dia = por_dia.get(d, [])
+            lista = "".join(
+                f'<div style="font-size:11px;padding:1px 3px;margin:1px 0;border-radius:3px;background:{"#fee2e2" if x["estado"]=="cancelada" else "#dbeafe"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{x["fecha"][11:16]} - {x["nombre"] or ""}">{x["fecha"][11:16]} {x["nombre"] or ""}</div>'
+                for x in citas_dia
+            )
+            celdas_html += f'<td style="vertical-align:top;height:80px;{"background:#eff6ff" if es_hoy else ""}"><b style="font-size:12px">{d}</b>{lista}</td>'
+        celdas_html += "</tr>"
+
+    calendario_html = (
+        f'<div class=card><div class=row style="justify-content:space-between;align-items:center">'
+        f'<a class=btn href="/citas?anio={mes_ant[0]}&mes={mes_ant[1]}">&larr; Anterior</a>'
+        f'<h3 style="margin:0">{nombres_mes[mes]} {anio}</h3>'
+        f'<a class=btn href="/citas?anio={mes_sig[0]}&mes={mes_sig[1]}">Siguiente &rarr;</a></div>'
+        f'<table style="margin-top:10px"><tr><th>Lun<th>Mar<th>Mié<th>Jue<th>Vie<th>Sáb<th>Dom</tr>{celdas_html}</table></div>'
+    )
+
+    return page("Citas", """<h1>Citas</h1>""" + calendario_html + """
+<h2>Listado</h2><table><tr><th>Fecha<th>Paciente<th>Odontólogo<th>Motivo<th>Estado<th></tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.nombre or c.nombre_libre}} {{c.telefono_libre or ''}}
 <td>{{c.dentist_name or '—'}}<td>{{c.motivo}}<td>{{c.estado}} {{'(portal)' if c.origen=='portal'}}<td><form method=post action=/citas/{{c.id}} class=row style=margin:0>
 <select name=estado>{% for e in ['pendiente','confirmada','atendida','cancelada'] %}<option>{{e}}</option>{% endfor %}</select><button>Cambiar</button></form></tr>{% endfor %}</table>
 <h2>Nueva cita</h2><form method=post class=row><select name=patient_id required>{% for p in ps %}<option value={{p.id}}>{{p.nombre}}</option>{% endfor %}</select>
@@ -751,9 +1026,51 @@ def recordatorios():
     a, b = dt.datetime.now(), dt.datetime.now() + dt.timedelta(days=2)
     cs = q("""SELECT c.*,COALESCE(p.nombre,c.nombre_libre) n,COALESCE(p.telefono,c.telefono_libre) t,p.email FROM citas c LEFT JOIN patients p ON p.id=c.patient_id
               WHERE c.estado IN('pendiente','confirmada') AND c.fecha BETWEEN ? AND ? ORDER BY c.fecha""", (a.strftime("%Y-%m-%d %H:%M"), b.strftime("%Y-%m-%d %H:%M")))
-    return page("Recordatorios", """<h1>Citas de las próximas 48 horas</h1><table><tr><th>Fecha<th>Paciente<th>Enviar</tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.n}}
+    nota_email = "" if EMAIL_LISTO else ('<p style="font-size:13px;color:var(--mute)">El envío de correo automático no está activo todavía '
+                                          '(falta configurar SMTP_HOST, SMTP_USER y SMTP_PASS). El botón de WhatsApp sigue funcionando normal.</p>')
+    return page("Recordatorios", """<h1>Citas de las próximas 48 horas</h1>""" + nota_email + """
+<table><tr><th>Fecha<th>Paciente<th>Enviar</tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.n}}
 <td>{% set m='Hola '+c.n+', le recordamos su cita el '+c.fecha+' en Dra. Natalia Morera Odontología. Responda este mensaje para confirmar.' %}
-{% if wa(c.t,m) %}<a class=btn href="{{wa(c.t,m)}}" target=_blank>WhatsApp</a>{% endif %}</tr>{% else %}<tr><td colspan=3>No hay citas próximas.</tr>{% endfor %}</table>""", cs=cs)
+{% if wa(c.t,m) %}<a class=btn href="{{wa(c.t,m)}}" target=_blank>WhatsApp</a>{% endif %}
+{% if c.email %}<form method=post action="/recordatorios/{{c.id}}/correo" style="display:inline;margin:0"><button style="padding:5px 10px;font-size:12.5px">Enviar correo</button></form>{% endif %}
+</tr>{% else %}<tr><td colspan=3>No hay citas próximas.</tr>{% endfor %}</table>
+<h2>Recordatorios masivos por rango de fechas</h2>
+<form method=post action="/recordatorios/masivo" class=row>
+<label>Desde <input type=date name=desde required></label>
+<label>Hasta <input type=date name=hasta required></label>
+<button>Enviar recordatorio por correo a todas las citas del rango</button></form>""", cs=cs)
+
+@app.post("/recordatorios/<int:cid>/correo")
+@need("odontologo", "recepcion")
+def recordatorio_correo(cid):
+    c = q("""SELECT c.*,COALESCE(p.nombre,c.nombre_libre) n,p.email FROM citas c LEFT JOIN patients p ON p.id=c.patient_id
+             WHERE c.id=?""", (cid,), one=True) or abort(404)
+    asunto = "Recordatorio de su cita - Dra. Natalia Morera Odontología Especializada"
+    cuerpo = f"Hola {c['n']},\n\nLe recordamos su cita el {c['fecha']} en Dra. Natalia Morera Odontología Especializada.\n\nSi necesita reprogramar, por favor contáctenos.\n\nGracias."
+    ok_envio, error = enviar_correo(c["email"], asunto, cuerpo)
+    flash("Correo de recordatorio enviado." if ok_envio else f"No se pudo enviar el correo: {error}")
+    return redirect("/recordatorios")
+
+@app.post("/recordatorios/masivo")
+@need("odontologo", "recepcion")
+def recordatorios_masivo():
+    desde, hasta = request.form["desde"], request.form["hasta"]
+    cs = q("""SELECT c.*,COALESCE(p.nombre,c.nombre_libre) n,p.email FROM citas c LEFT JOIN patients p ON p.id=c.patient_id
+              WHERE c.estado IN('pendiente','confirmada') AND c.fecha BETWEEN ? AND ? ORDER BY c.fecha""",
+             (desde + " 00:00", hasta + " 23:59"))
+    enviados, sin_correo, fallidos = 0, 0, 0
+    for c in cs:
+        if not c["email"]:
+            sin_correo += 1
+            continue
+        asunto = "Recordatorio de su cita - Dra. Natalia Morera Odontología Especializada"
+        cuerpo = f"Hola {c['n']},\n\nLe recordamos su cita el {c['fecha']} en Dra. Natalia Morera Odontología Especializada.\n\nSi necesita reprogramar, por favor contáctenos.\n\nGracias."
+        ok_envio, _ = enviar_correo(c["email"], asunto, cuerpo)
+        if ok_envio: enviados += 1
+        else: fallidos += 1
+    audit("recordatorios_masivo", f"{desde} a {hasta}: {enviados} enviados, {sin_correo} sin correo, {fallidos} fallidos")
+    flash(f"Recordatorios enviados: {enviados}. Sin correo registrado: {sin_correo}. Fallidos: {fallidos}.")
+    return redirect("/recordatorios")
 
 @app.route("/reactivacion")
 @need("odontologo", "recepcion")
@@ -969,6 +1286,12 @@ def gastos():
 DIENTES_ADULTO = [18,17,16,15,14,13,12,11,21,22,23,24,25,26,27,28,
                    48,47,46,45,44,43,42,41,31,32,33,34,35,36,37,38]
 PUNTOS_DIENTES = {"18": [30.2, 246.7], "17": [37.0, 208.5], "16": [53.0, 172.2], "15": [77.5, 139.3], "14": [109.6, 111.2], "13": [147.9, 89.1], "12": [190.8, 73.8], "11": [236.6, 66.0], "21": [283.4, 66.0], "22": [329.2, 73.8], "23": [372.1, 89.1], "24": [410.4, 111.2], "25": [442.5, 139.3], "26": [467.0, 172.2], "27": [483.0, 208.5], "28": [489.8, 246.7], "48": [70.2, 271.5], "47": [75.8, 301.7], "46": [89.0, 330.4], "45": [109.3, 356.3], "44": [135.8, 378.5], "43": [167.4, 396.0], "42": [202.9, 408.1], "41": [240.7, 414.2], "31": [279.3, 414.2], "32": [317.1, 408.1], "33": [352.6, 396.0], "34": [384.2, 378.5], "35": [410.7, 356.3], "36": [431.0, 330.4], "37": [444.2, 301.7], "38": [449.8, 271.5]}
+
+DIENTES_TEMPORAL = [55,54,53,52,51,61,62,63,64,65,85,84,83,82,81,71,72,73,74,75]
+PUNTOS_DIENTES_TEMPORAL = {"55": [128.6, 143.7], "54": [151.7, 123.5], "53": [179.3, 107.6], "52": [210.2, 96.5], "51": [243.2, 90.9],
+    "61": [276.8, 90.9], "62": [309.8, 96.5], "63": [340.7, 107.6], "64": [368.3, 123.5], "65": [391.4, 143.7],
+    "85": [139.4, 351.0], "84": [160.6, 368.8], "83": [185.9, 382.8], "82": [214.3, 392.5], "81": [244.6, 397.4],
+    "71": [275.4, 397.4], "72": [305.7, 392.5], "73": [334.1, 382.8], "74": [359.4, 368.8], "75": [380.6, 351.0]}
 CONDICIONES = {
     "tratamiento": ("#fbbf24", "Pendiente por tratar"),
     "caries":      ("#e11d48", "Caries"),
@@ -983,6 +1306,8 @@ CONDICIONES = {
 @need("odontologo", "recepcion", "radiologo", "admin")
 def odontograma(pid):
     p = q("SELECT * FROM patients WHERE id=?", (pid,), one=True) or abort(404)
+    vista = request.args.get("vista", "adulto")
+    if vista not in ("adulto", "temporal"): vista = "adulto"
     if request.method == "POST" and session["rol"] in ("odontologo", "admin"):
         f = request.form
         ex("""INSERT INTO plan(patient_id,diente,tratamiento,etapa,costo,estado,notas,condicion,profesional,fecha_registro)
@@ -990,15 +1315,17 @@ def odontograma(pid):
            (pid, f["diente"], f["tratamiento"].strip(), "Odontograma", float(f.get("costo") or 0), "pendiente",
             f.get("notas", ""), f.get("condicion", "tratamiento"), session.get("u"), dt.date.today().isoformat()))
         audit("odontograma_marca", f"paciente {pid} diente {f['diente']} ({f.get('condicion','tratamiento')})")
-        return redirect(f"/pacientes/{pid}/odontograma")
+        return redirect(f"/pacientes/{pid}/odontograma?vista={f.get('vista_actual','adulto')}")
     marcas = q("SELECT * FROM plan WHERE patient_id=? ORDER BY id DESC", (pid,))
     ultima_por_diente = {}
     for m in marcas:
         if str(m["diente"]) not in ultima_por_diente:
             ultima_por_diente[str(m["diente"])] = m
+    lista_dientes = DIENTES_ADULTO if vista == "adulto" else DIENTES_TEMPORAL
+    puntos = PUNTOS_DIENTES if vista == "adulto" else PUNTOS_DIENTES_TEMPORAL
     dientes_svg = ""
-    for d in DIENTES_ADULTO:
-        x, y = PUNTOS_DIENTES[str(d)]
+    for d in lista_dientes:
+        x, y = puntos[str(d)]
         m = ultima_por_diente.get(str(d))
         cond = (m["condicion"] if m and m["condicion"] else None)
         relleno, _ = CONDICIONES.get(cond, ("#ffffff", ""))
@@ -1028,13 +1355,19 @@ def odontograma(pid):
         for color, label in CONDICIONES.values()
     )
     opciones_select = "".join(f'<option value="{k}">{v[1]}</option>' for k, v in CONDICIONES.items())
+    selector_vista = (
+        f'<div style="margin-bottom:10px"><a class="btn" '
+        f'href="/pacientes/{pid}/odontograma?vista=adulto" style="{"opacity:1" if vista=="adulto" else "opacity:.55"};margin-right:8px">Dentición permanente</a>'
+        f'<a class="btn" href="/pacientes/{pid}/odontograma?vista=temporal" style="{"opacity:1" if vista=="temporal" else "opacity:.55"}">Dentición temporal (niños)</a></div>'
+    )
     return page(f"Odontograma - {p['nombre']}", """<h1>Odontograma de {{p.nombre}}</h1>
-<p><a href="/pacientes/{{p.id}}">&larr; Volver a la ficha del paciente</a></p>
+<p><a href="/pacientes/{{p.id}}">&larr; Volver a la ficha del paciente</a></p>""" + selector_vista + """
 <div class=card style="display:flex;flex-direction:column;align-items:center">""" + svg + """
 <div style="margin-top:10px;text-align:center">""" + leyenda + """</div>
 <p style="font-size:13px;color:var(--mute)">Haz clic sobre un diente para seleccionarlo abajo. Si un diente tiene varios registros, se muestra el más reciente.</p>
 </div>
 {% if session.rol in ['odontologo','admin'] %}<div class=card><form method=post class=row>
+<input type=hidden name=vista_actual value="""" + vista + """">
 <input id=diente name=diente placeholder="N° diente" required size=4>
 <select name=condicion>""" + opciones_select + """</select>
 <input name=tratamiento placeholder=Tratamiento required size=20><input name=costo type=number step=1000 placeholder=Costo>
