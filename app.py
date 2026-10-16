@@ -343,16 +343,23 @@ form.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;align-items:center}
   display:flex;align-items:center;justify-content:center;font-family:Georgia,"Times New Roman",serif;font-weight:700;font-size:16px;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.25)}
 .brand-logo{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#fff;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.25)}
 nav .brand b{font-family:Georgia,"Times New Roman",serif;font-size:18px;letter-spacing:.01em}
-.stats{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0 22px}
-.stat{flex:1;min-width:150px;background:var(--card);border-radius:14px;padding:16px 18px;box-shadow:0 1px 4px rgba(15,23,42,.08);border-left:5px solid var(--azul)}
-.stat.v2{border-left-color:var(--acento)}.stat.v3{border-left-color:var(--adv)}.stat.v4{border-left-color:#8b5cf6}
-.stat b{display:block;font-size:28px;color:var(--azul-osc);line-height:1.1}
-.stat span{display:block;font-size:12.5px;color:var(--mute);margin-top:4px;text-transform:uppercase;letter-spacing:.03em}
+.stats{display:flex;gap:16px;flex-wrap:wrap;margin:14px 0 22px}
+.stat{flex:1;min-width:160px;border-radius:16px;padding:18px 20px;box-shadow:0 4px 14px rgba(37,99,235,.12);
+  color:#fff;background:linear-gradient(135deg,#3b82f6,#1e3a8a);position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s}
+.stat:hover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(37,99,235,.22)}
+.stat.v2{background:linear-gradient(135deg,#2dd4bf,#0d9488)}
+.stat.v3{background:linear-gradient(135deg,#fbbf24,#d97706)}
+.stat.v4{background:linear-gradient(135deg,#a78bfa,#7c3aed)}
+.stat b{display:block;font-size:30px;color:#fff;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,.15)}
+.stat span{display:block;font-size:12px;color:rgba(255,255,255,.92);margin-top:5px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
 .citas-hoy{display:flex;flex-direction:column;gap:10px}
-.cita-card{display:flex;align-items:center;gap:14px;background:var(--card);border-radius:12px;padding:12px 16px;box-shadow:0 1px 3px rgba(15,23,42,.08);border-left:4px solid var(--azul)}
-.cita-card .hora{font-weight:700;color:var(--azul-osc);min-width:56px;font-size:15px}
+.cita-card{display:flex;align-items:center;gap:14px;background:var(--card);border-radius:14px;padding:13px 18px;
+  box-shadow:0 2px 8px rgba(15,23,42,.08);border-left:5px solid var(--acento);transition:transform .15s,box-shadow .15s}
+.cita-card:hover{transform:translateX(3px);box-shadow:0 4px 14px rgba(15,23,42,.14)}
+.cita-card .hora{font-weight:700;color:#fff;min-width:60px;font-size:14px;text-align:center;background:linear-gradient(135deg,#3b82f6,#1e3a8a);
+  border-radius:8px;padding:6px 4px}
 .cita-card .info{flex:1}
-.cita-card .info b{display:block;font-size:14.5px}
+.cita-card .info b{display:block;font-size:14.5px;color:var(--azul-osc)}
 .cita-card .info small{color:var(--mute)}
 .pill{display:inline-block;padding:3px 10px;border-radius:99px;font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.02em}
 .pill.pendiente{background:#fff3cd;color:#92680a}.pill.confirmada{background:#dcfce7;color:#15803d}
@@ -416,7 +423,7 @@ def home():
     mes = hoy[:7]
     pac_mes = q("SELECT COUNT(*) n FROM patients WHERE creado LIKE ?", (mes + "%",), one=True)["n"]
     completadas_hoy = q("SELECT COUNT(*) n FROM citas WHERE fecha LIKE ? AND estado='completada'", (hoy + "%",), one=True)["n"]
-    return page("Inicio", """<h1>Hoy, {{hoy_legible}}</h1>
+    return page("Inicio", """<h1 style="background:linear-gradient(90deg,#1e3a8a,#0ea5e9,#14b8a6);-webkit-background-clip:text;background-clip:text;color:transparent">&#128197; Hoy, {{hoy_legible}}</h1>
 {% if n %}<div class=msg>{{n}} reserva(s) del portal esperan confirmación. <a href=/citas>Ver citas</a></div>{% endif %}
 <div class=stats>
 <div class=stat><b>{{citas|length}}</b><span>Citas hoy</span></div>
@@ -983,27 +990,49 @@ def citas():
         semanas.append(semana)
 
     celdas_html = ""
+    colores_estado = {
+        "cancelada":  {"bg": "linear-gradient(135deg,#fecaca,#fca5a5)", "fg": "#7f1d1d", "dot": "#ef4444"},
+        "atendida":   {"bg": "linear-gradient(135deg,#bbf7d0,#86efac)", "fg": "#14532d", "dot": "#22c55e"},
+        "confirmada": {"bg": "linear-gradient(135deg,#bfdbfe,#93c5fd)", "fg": "#1e3a8a", "dot": "#3b82f6"},
+        "pendiente":  {"bg": "linear-gradient(135deg,#fde68a,#fcd34d)", "fg": "#78350f", "dot": "#f59e0b"},
+    }
     for semana in semanas:
         celdas_html += "<tr>"
         for d in semana:
             if d is None:
-                celdas_html += "<td style='background:#f8fafc'></td>"
+                celdas_html += "<td style='background:#f8fafc;border:none'></td>"
                 continue
             es_hoy = (d == hoy.day and mes == hoy.month and anio == hoy.year)
             citas_dia = por_dia.get(d, [])
             lista = "".join(
-                f'<div style="font-size:11px;padding:1px 3px;margin:1px 0;border-radius:3px;background:{"#fee2e2" if x["estado"]=="cancelada" else "#dbeafe"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{x["fecha"][11:16]} - {x["nombre"] or ""}">{x["fecha"][11:16]} {x["nombre"] or ""}</div>'
+                f'<div style="font-size:11px;padding:3px 6px;margin:2px 0;border-radius:6px;'
+                f'background:{colores_estado.get(x["estado"], colores_estado["pendiente"])["bg"]};'
+                f'color:{colores_estado.get(x["estado"], colores_estado["pendiente"])["fg"]};'
+                f'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+                f'box-shadow:0 1px 2px rgba(0,0,0,.08)" title="{x["fecha"][11:16]} - {x["nombre"] or ""} ({x["estado"]})">'
+                f'&#9679; {x["fecha"][11:16]} {x["nombre"] or ""}</div>'
                 for x in citas_dia
             )
-            celdas_html += f'<td style="vertical-align:top;height:80px;{"background:#eff6ff" if es_hoy else ""}"><b style="font-size:12px">{d}</b>{lista}</td>'
+            estilo_celda = ("background:linear-gradient(160deg,#ecfeff,#cffafe);"
+                             "box-shadow:inset 0 0 0 2px #06b6d4;") if es_hoy else "background:#ffffff;"
+            numero_dia = (f'<span style="display:inline-flex;align-items:center;justify-content:center;'
+                          f'width:24px;height:24px;border-radius:50%;background:#06b6d4;color:#fff;'
+                          f'font-weight:700;font-size:12px">{d}</span>') if es_hoy else f'<b style="font-size:12px;color:#334155">{d}</b>'
+            celdas_html += f'<td style="vertical-align:top;height:86px;border-radius:10px;padding:4px;{estilo_celda}">{numero_dia}{lista}</td>'
         celdas_html += "</tr>"
 
     calendario_html = (
-        f'<div class=card><div class=row style="justify-content:space-between;align-items:center">'
-        f'<a class=btn href="/citas?anio={mes_ant[0]}&mes={mes_ant[1]}">&larr; Anterior</a>'
-        f'<h3 style="margin:0">{nombres_mes[mes]} {anio}</h3>'
-        f'<a class=btn href="/citas?anio={mes_sig[0]}&mes={mes_sig[1]}">Siguiente &rarr;</a></div>'
-        f'<table style="margin-top:10px"><tr><th>Lun<th>Mar<th>Mié<th>Jue<th>Vie<th>Sáb<th>Dom</tr>{celdas_html}</table></div>'
+        f'<div class=card style="background:linear-gradient(160deg,#f0f9ff,#ffffff);border-radius:16px;padding:18px;box-shadow:0 4px 18px rgba(2,132,199,.08)">'
+        f'<div class=row style="justify-content:space-between;align-items:center">'
+        f'<a class=btn style="background:#0ea5e9;color:#fff;border-radius:8px" href="/citas?anio={mes_ant[0]}&mes={mes_ant[1]}">&larr; Anterior</a>'
+        f'<h3 style="margin:0;background:linear-gradient(90deg,#0ea5e9,#6366f1);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:22px">{nombres_mes[mes]} {anio}</h3>'
+        f'<a class=btn style="background:#0ea5e9;color:#fff;border-radius:8px" href="/citas?anio={mes_sig[0]}&mes={mes_sig[1]}">Siguiente &rarr;</a></div>'
+        f'<table style="margin-top:12px;border-collapse:separate;border-spacing:4px">'
+        f'<tr>{"".join(f"<th style=\'background:#0ea5e9;color:#fff;border-radius:6px;padding:4px\'>{dnom}</th>" for dnom in ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"])}</tr>'
+        f'{celdas_html}</table>'
+        f'<div class=row style="margin-top:10px;gap:14px;font-size:12px;color:#475569">'
+        + "".join(f'<span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{v["dot"]};margin-right:4px"></span>{k.capitalize()}</span>' for k, v in colores_estado.items())
+        + '</div></div>'
     )
 
     return page("Citas", """<h1>Citas</h1>""" + calendario_html + """
