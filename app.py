@@ -330,7 +330,7 @@ LAYOUT = """<!doctype html><html lang=es><head><meta charset=utf-8>
 --acento:#14b8a6;--mal:#e11d48;--bien:#16a34a;--adv:#f59e0b;--mute:#64748b;--card:#ffffff}
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.55 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--paper);display:flex;min-height:100vh}
-nav{width:240px;background:linear-gradient(180deg,#1e3a8a,#172e68);color:#fff;padding:22px 14px;flex:none;box-shadow:2px 0 10px rgba(0,0,0,.08)}
+nav{width:240px;background:linear-gradient(180deg,#1e3a8a,#172e68);color:#fff;padding:22px 14px;flex:none;box-shadow:2px 0 10px rgba(0,0,0,.08);position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto;scrollbar-width:thin}
 nav b{display:block;font-size:17px;margin-bottom:4px;color:#fff;letter-spacing:.02em}
 nav small{display:block;color:#aecbf5;margin-bottom:20px;font-size:11px}
 nav .grp{color:#8fb8da;font-size:11px;text-transform:uppercase;letter-spacing:.07em;margin:16px 6px 6px;font-weight:600}
@@ -1071,7 +1071,7 @@ def citas():
     return page("Citas", """<h1>Citas</h1>""" + calendario_html + """
 <h2>Listado</h2><table><tr><th>Fecha<th>Paciente<th>Odontólogo<th>Motivo<th>Estado<th></tr>{% for c in cs %}<tr><td>{{c.fecha}}<td>{{c.nombre or c.nombre_libre}} {{c.telefono_libre or ''}}
 <td>{{c.dentist_name or '—'}}<td>{{c.motivo}}<td>{{c.estado}} {{'(portal)' if c.origen=='portal'}}<td><form method=post action=/citas/{{c.id}} class=row style=margin:0>
-<select name=estado>{% for e in ['pendiente','confirmada','atendida','cancelada'] %}<option>{{e}}</option>{% endfor %}</select><button>Cambiar</button></form></tr>{% endfor %}</table>
+<select name=estado>{% for e in ['pendiente','confirmada','atendida','cancelada'] %}<option {{'selected' if e==c.estado}}>{{e}}</option>{% endfor %}</select><button>Cambiar</button></form><form method=post action=/citas/{{c.id}}/eliminar style=margin:0 onsubmit="return confirm('¿Eliminar esta cita? Esta acción no se puede deshacer.')"><button style="background:#dc2626">Eliminar</button></form></tr>{% endfor %}</table>
 <h2>Nueva cita</h2><form method=post class=row><select name=patient_id required>{% for p in ps %}<option value={{p.id}}>{{p.nombre}}</option>{% endfor %}</select>
 <select name=dentist_id><option value="">Odontólogo (opcional)</option>{% for d in ds %}<option value={{d.id}}>{{d.name}}</option>{% endfor %}</select>
 <input type=datetime-local name=fecha required><input name=motivo placeholder=Motivo><button>Agendar cita</button></form>""",
@@ -1081,6 +1081,14 @@ def citas():
 @need("odontologo", "recepcion")
 def cita_estado(i):
     ex("UPDATE citas SET estado=? WHERE id=?", (request.form["estado"], i)); return redirect("/citas")
+
+@app.post("/citas/<int:i>/eliminar")
+@need("odontologo", "recepcion")
+def cita_eliminar(i):
+    ex("DELETE FROM citas WHERE id=?", (i,))
+    audit("eliminar_cita", f"cita {i}")
+    flash("Cita eliminada.")
+    return redirect("/citas")
 
 @app.route("/recordatorios")
 @need("odontologo", "recepcion")
