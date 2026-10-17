@@ -337,11 +337,11 @@ nav .grp{color:#8fb8da;font-size:11px;text-transform:uppercase;letter-spacing:.0
 nav a{display:block;color:#eaf2fa;text-decoration:none;padding:9px 12px;border-radius:8px;font-size:14px;margin-bottom:2px;transition:background .15s}
 nav a:hover{background:rgba(255,255,255,.14)}
 main{flex:1;padding:30px 34px;max-width:1100px;overflow-x:auto;position:relative}
-.marca-agua{position:fixed;top:0;left:240px;right:0;bottom:0;display:flex;align-items:center;justify-content:center;
-  pointer-events:none;z-index:0;overflow:hidden}
-.marca-agua img{max-width:42%;max-height:42%;opacity:.07;border-radius:36px;object-fit:contain}
+.marca-agua{position:fixed;right:16px;bottom:16px;z-index:40;pointer-events:none}
+.marca-agua img{width:96px;height:96px;max-width:96px;max-height:96px;opacity:1;border-radius:50%;object-fit:cover;box-shadow:0 3px 14px rgba(0,0,0,.3);border:3px solid #fff}
+
 main>*{position:relative;z-index:1}
-@media(max-width:700px){.marca-agua{left:0}}
+
 h1{margin:0 0 18px;font-size:27px;color:var(--azul-osc);font-weight:700}
 h2{font-size:18px;margin:30px 0 10px;color:var(--azul-osc);font-weight:600;border-bottom:2px solid var(--azul-suave);padding-bottom:6px}
 table{border-collapse:separate;border-spacing:0;width:100%;background:var(--card);border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,.08)}
