@@ -411,7 +411,7 @@ style="width:100%;text-align:left;background:rgba(255,255,255,.12);color:#fff;bo
 </div></div>
 <form action=/buscar method=get style="margin:4px 0 14px"><input name=q placeholder="🔎 Buscar paciente, cita..." style="width:100%;padding:8px 10px;border-radius:8px;border:none;font-size:13px"></form>
 <div class=grp>Panel</div><a href=/>Inicio</a>
-<div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a>
+<div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a><a href=/cumpleanos>🎂 Cumpleaños del mes</a>
 <div class=grp>Catálogos</div><a href=/odontologos>Odontólogos</a><a href=/servicios>Servicios</a>
 <div class=grp>Punto de venta</div><a href=/ventas>Punto de venta</a><a href=/productos>Inventario</a><a href=/caja>Caja</a><a href=/gastos>Gastos</a>
 <div class=grp>Reportes y cumplimiento</div><a href=/estadisticas>Estadísticas</a><a href=/resumen-mensual>Resumen mensual</a><a href=/rips>Reporte RIPS</a>
@@ -460,6 +460,19 @@ def notificaciones():
         pend = q("SELECT COUNT(*) n FROM cuentas WHERE estado!='pagada' AND COALESCE(abonado,0) < COALESCE(total,0)", one=True)["n"]
         if pend:
             avisos.append(f"{pend} cuenta(s) de paciente con saldo pendiente")
+    except Exception:
+        pass
+    try:
+        bajo = q("SELECT COUNT(*) n FROM products WHERE active=1 AND stock IS NOT NULL AND min IS NOT NULL AND stock<=min", one=True)["n"]
+        if bajo:
+            avisos.append(f"{bajo} producto(s) con stock bajo")
+    except Exception:
+        pass
+    try:
+        maniana2 = (dt.date.today() + dt.timedelta(days=0)).strftime("%m-%d")
+        cumple = q("SELECT COUNT(*) n FROM patients WHERE fecha_nac IS NOT NULL AND substr(fecha_nac,6,5)=?", (maniana2,), one=True)["n"]
+        if cumple:
+            avisos.append(f"{cumple} paciente(s) cumple(n) años hoy")
     except Exception:
         pass
     return avisos
@@ -711,6 +724,22 @@ def resumen_mensual():
         ing_atenciones=ing_atenciones, ing_abonos=ing_abonos, ing_ventas=ing_ventas,
         citas_total=citas_total, citas_atendidas=citas_atendidas, pac_nuevos=pac_nuevos, pac_distintos=pac_distintos)
 
+@app.route("/cumpleanos")
+@need("odontologo", "recepcion")
+def cumpleanos():
+    hoy = dt.date.today()
+    mes_str = f"{hoy.month:02d}"
+    pacientes_mes = q("SELECT * FROM patients WHERE fecha_nac IS NOT NULL AND substr(fecha_nac,6,2)=?", (mes_str,))
+    pacientes_mes = sorted(pacientes_mes, key=lambda p: p["fecha_nac"][8:10])
+    nombres_mes = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+    return page("Cumpleaños del mes", """<h1>🎂 Cumpleaños de """ + nombres_mes[hoy.month] + """</h1>
+{% if pacientes_mes %}<table class=tbl><tr><th>Día<th>Paciente<th>Teléfono<th>Correo</tr>
+{% for p in pacientes_mes %}<tr{% if p.fecha_nac[8:10]|int==hoy.day %} style="background:#fef3c7;font-weight:600"{% endif %}>
+<td>{{p.fecha_nac[8:10]}}<td>{{p.nombre}}{% if p.fecha_nac[8:10]|int==hoy.day %} 🎉 ¡Hoy!{% endif %}<td>{{p.telefono or '—'}}<td>{{p.email or '—'}}</tr>
+{% endfor %}</table>
+{% else %}<p style="color:var(--mute)">No hay pacientes con cumpleaños registrado este mes.</p>{% endif %}""",
+        pacientes_mes=pacientes_mes, hoy=hoy)
+
 @app.route("/pacientes", methods=["GET", "POST"])
 @need("odontologo", "recepcion", "radiologo")
 def pacientes():
@@ -753,6 +782,8 @@ def paciente(pid):
             plan_g[-1][1].append(x)
         else:
             plan_g.append([x["etapa"] or "Sin etapa", [x]])
+    proxima_cita = q("""SELECT * FROM citas WHERE patient_id=? AND fecha>=? AND estado IN('pendiente','confirmada')
+                        ORDER BY fecha LIMIT 1""", (pid, dt.datetime.now().strftime("%Y-%m-%d %H:%M")), one=True)
     return page(p["nombre"], """<div class=row style="justify-content:space-between;align-items:flex-start">
 <div class=row style="align-items:flex-start">
 {% if p.foto %}<img src="/foto/{{p.id}}" style="width:84px;height:84px;object-fit:cover;border-radius:10px;border:1px solid #e2e8f0">
@@ -765,6 +796,8 @@ def paciente(pid):
 <button style="background:var(--mal);padding:7px 14px;font-size:13px">Eliminar paciente</button></form>{% endif %}
 </div>
 {% if p.alergias %}<div class=msg style="background:#fee2e2;border-left-color:var(--mal)"><b>⚠ Alergias:</b> {{p.alergias}}</div>{% endif %}
+{% if proxima_cita %}<div class=msg style="background:#dbeafe;border-left-color:#2563eb"><b>📅 Próxima cita:</b> {{proxima_cita.fecha}} — {{proxima_cita.motivo or 'Sin motivo especificado'}}</div>
+{% else %}<div class=msg style="background:#f1f5f9;border-left-color:#94a3b8"><b>📅 Próxima cita:</b> No tiene citas agendadas.</div>{% endif %}
 <div class=card>
 <h2 style="margin-top:0">Antecedentes médicos</h2>
 <p><b>Alergias:</b> {{p.alergias or 'Sin registrar'}}<br><b>Antecedentes / enfermedades de base:</b> {{p.antecedentes or 'Sin registrar'}}</p>
@@ -829,7 +862,7 @@ def paciente(pid):
 <input name=cod_cie10 placeholder="Código CIE-10" required size=8><input name=desc_cie10 placeholder="Diagnóstico" required size=22>
 <select name=tipo_diagnostico><option value=1>Impresión diagnóstica</option><option value=2>Confirmado nuevo</option><option value=3>Confirmado repetido</option></select>
 <input name=valor type=number step=1000 placeholder=Valor required><input name=num_factura placeholder="N° factura" size=10><button>Registrar atención</button></form>{% endif %}""",
-        p=p, plan=plan, plan_g=plan_g, tot=tot, hecho=hecho,
+        p=p, plan=plan, plan_g=plan_g, tot=tot, hecho=hecho, proxima_cita=proxima_cita,
         labs=q("SELECT * FROM labs WHERE patient_id=? ORDER BY id DESC", (pid,)),
         recetas=q("""SELECT r.*, (SELECT GROUP_CONCAT(medicamento,', ') FROM receta_items WHERE receta_id=r.id) resumen
                       FROM recetas r WHERE patient_id=? ORDER BY id DESC""", (pid,)),
@@ -1444,16 +1477,18 @@ def productos():
                 int(f.get("stock") or 0), int(f.get("min") or 0), f.get("barcode","")))
             audit("crear_producto", f["name"].strip())
     ps = q("SELECT * FROM products WHERE active=1 ORDER BY name")
+    n_bajo = sum(1 for p in ps if p["stock"] is not None and p["min"] is not None and p["stock"] <= p["min"])
     return page("Productos", """<h1>Productos e inventario</h1>
+{% if n_bajo %}<p style="color:#dc2626;font-weight:600">&#9888; {{n_bajo}} producto(s) con stock bajo o agotado, revisa la lista resaltada en rojo.</p>{% endif %}
 <table><tr><th>Nombre<th>Tipo<th>Precio<th>Costo<th>Stock<th>Mínimo</tr>
 {% for p in ps %}<tr{% if p.stock is not none and p.min is not none and p.stock<=p.min %} style="background:#fee"{% endif %}>
-<td>{{p.name}}<td>{{p.kind}}<td>${{'{:,.0f}'.format(p.price or 0)}}<td>${{'{:,.0f}'.format(p.cost or 0)}}<td>{{p.stock}}<td>{{p.min}}</tr>
+<td>{{p.name}}<td>{{p.kind}}<td>${{'{:,.0f}'.format(p.price or 0)}}<td>${{'{:,.0f}'.format(p.cost or 0)}}<td>{{p.stock}}{% if p.stock is not none and p.min is not none and p.stock<=p.min %} <b style="color:#dc2626">⚠ Bajo</b>{% endif %}<td>{{p.min}}</tr>
 {% else %}<tr><td colspan=6>Sin productos registrados.</tr>{% endfor %}</table>
 <h2>Nuevo producto</h2><form method=post class=row>
 <input name=name placeholder=Nombre required><select name=kind><option value=insumo>Insumo</option><option value=venta>Producto de venta</option><option value=servicio>Servicio</option></select>
 <input name=price type=number step=100 placeholder=Precio><input name=cost type=number step=100 placeholder=Costo>
 <input name=stock type=number placeholder=Stock><input name=min type=number placeholder="Stock mínimo"><input name=barcode placeholder="Código de barras">
-<button>Guardar producto</button></form>""", ps=ps)
+<button>Guardar producto</button></form>""", ps=ps, n_bajo=n_bajo)
 
 @app.route("/ventas", methods=["GET", "POST"])
 @need("admin", "recepcion", "odontologo")
