@@ -400,11 +400,21 @@ main{padding:16px}
 @media print{nav,.noprint{display:none}}
 </style></head><body>
 {% if session.u %}<nav id=navbar><button type=button class=toggle-menu onclick="document.getElementById('navbar').classList.toggle('abierto')">☰ Menú</button><div class=brand>{% if logo_file %}<img src="/logo?v={{logo_file}}" class=brand-logo>{% else %}<span class=brand-badge>NM</span>{% endif %}<div><b>Dra. Natalia Morera</b><small>Odontología Especializada</small></div></div>
+<div style="position:relative;margin:4px 0 10px">
+<button type=button onclick="var d=document.getElementById('avisos-drop');d.style.display=d.style.display=='block'?'none':'block'"
+style="width:100%;text-align:left;background:rgba(255,255,255,.12);color:#fff;border:none;padding:8px 10px;border-radius:8px;font-size:13px;font-weight:600">
+🔔 Avisos {% if avisos %}<span style="background:#ef4444;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;margin-left:4px">{{avisos|length}}</span>{% endif %}
+</button>
+<div id=avisos-drop style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;color:#1e293b;border-radius:8px;margin-top:4px;padding:8px;z-index:50;box-shadow:0 6px 18px rgba(0,0,0,.25);font-size:13px">
+{% if avisos %}{% for a in avisos %}<div style="padding:5px 4px;border-bottom:1px solid #eef2f7">{{a}}</div>{% endfor %}
+{% else %}<div style="padding:5px 4px;color:#94a3b8">Sin avisos pendientes.</div>{% endif %}
+</div></div>
+<form action=/buscar method=get style="margin:4px 0 14px"><input name=q placeholder="🔎 Buscar paciente, cita..." style="width:100%;padding:8px 10px;border-radius:8px;border:none;font-size:13px"></form>
 <div class=grp>Panel</div><a href=/>Inicio</a>
 <div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a>
 <div class=grp>Catálogos</div><a href=/odontologos>Odontólogos</a><a href=/servicios>Servicios</a>
 <div class=grp>Punto de venta</div><a href=/ventas>Punto de venta</a><a href=/productos>Inventario</a><a href=/caja>Caja</a><a href=/gastos>Gastos</a>
-<div class=grp>Reportes y cumplimiento</div><a href=/estadisticas>Estadísticas</a><a href=/rips>Reporte RIPS</a>
+<div class=grp>Reportes y cumplimiento</div><a href=/estadisticas>Estadísticas</a><a href=/resumen-mensual>Resumen mensual</a><a href=/rips>Reporte RIPS</a>
 <div class=grp>Facturación</div><a href=/ventas>Facturación electrónica</a>
 {% if session.rol=='admin' %}<div class=grp>Administración</div><a href=/usuarios>Usuarios y personal</a><a href=/configuracion>Ajustes</a>{% endif %}
 <div class=grp>Portal</div><a href=/reservar>Portal de reservas</a>
@@ -437,12 +447,31 @@ document.addEventListener("click", function(e){
 <style>tr.fila-sel{outline:2px solid #2563eb;outline-offset:-2px;background:#eff6ff !important}</style>
 <main><div class=marca-agua><img src="/marca"></div>{% for m in get_flashed_messages() %}<div class=msg>{{m}}</div>{% endfor %}%%BODY%%</main></body></html>"""
 
+def notificaciones():
+    avisos = []
+    try:
+        maniana = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+        sin_conf = q("SELECT COUNT(*) n FROM citas WHERE fecha LIKE ? AND estado IN('pendiente','confirmada')", (maniana + "%",), one=True)["n"]
+        if sin_conf:
+            avisos.append(f"{sin_conf} cita(s) agendada(s) para mañana")
+    except Exception:
+        pass
+    try:
+        pend = q("SELECT COUNT(*) n FROM cuentas WHERE estado!='pagada' AND COALESCE(abonado,0) < COALESCE(total,0)", one=True)["n"]
+        if pend:
+            avisos.append(f"{pend} cuenta(s) de paciente con saldo pendiente")
+    except Exception:
+        pass
+    return avisos
+
 def page(t, body, **c):
     logo_file = ""
+    avisos = []
     if session.get("u"):
         row = q("SELECT value FROM settings WHERE key='logo_file'", one=True)
         logo_file = row["value"] if row else ""
-    return render_template_string(LAYOUT.replace("%%BODY%%", body), t=t, logo_file=logo_file, **c)
+        avisos = notificaciones()
+    return render_template_string(LAYOUT.replace("%%BODY%%", body), t=t, logo_file=logo_file, avisos=avisos, **c)
 
 LOGIN_FORM = """<h1>Entrar</h1><form method=post class=row><input name=usuario placeholder=Usuario required autofocus>
 <input name=clave type=password placeholder=Contraseña required><button>Entrar</button></form>
@@ -585,6 +614,102 @@ def estadisticas():
 """ + (filas_trat or "<p>Todavía no hay suficientes datos.</p>") + """
 </div>""")
 
+
+@app.route("/buscar")
+@need("odontologo", "recepcion", "radiologo")
+def buscar():
+    term = request.args.get("q", "").strip()
+    pac_r, cit_r, ven_r = [], [], []
+    if term:
+        like = f"%{term}%"
+        pac_r = q("SELECT id,nombre,documento,telefono FROM patients WHERE nombre LIKE ? OR documento LIKE ? OR telefono LIKE ? ORDER BY nombre LIMIT 20",
+                   (like, like, like))
+        cit_r = q("""SELECT c.id,c.fecha,c.motivo,c.estado,COALESCE(p.nombre,c.nombre_libre) nombre FROM citas c
+                     LEFT JOIN patients p ON p.id=c.patient_id
+                     WHERE COALESCE(p.nombre,c.nombre_libre) LIKE ? OR c.motivo LIKE ?
+                     ORDER BY c.fecha DESC LIMIT 20""", (like, like))
+        ven_r = q("""SELECT s.id,s.date,s.total,COALESCE(p.nombre,'Sin paciente') nombre FROM sales s
+                     LEFT JOIN patients p ON p.id=s.patient_id
+                     WHERE COALESCE(p.nombre,'') LIKE ? ORDER BY s.date DESC LIMIT 20""", (like,))
+    return page("Buscar", """
+<h1>Buscar en todo el sistema</h1>
+<form class=row style="margin-bottom:18px"><input name=q value="{{term}}" placeholder="Nombre, documento, teléfono o motivo..." style="min-width:300px" autofocus><button>Buscar</button></form>
+{% if term %}
+<h2>Pacientes ({{pac_r|length}})</h2>
+{% if pac_r %}<table class=tbl><tr><th>Nombre<th>Documento<th>Teléfono<th></tr>
+{% for p in pac_r %}<tr><td>{{p.nombre}}<td>{{p.documento or '—'}}<td>{{p.telefono or '—'}}<td><a href="/pacientes/{{p.id}}">Ver ficha</a></tr>{% endfor %}</table>
+{% else %}<p style="color:var(--mute)">Sin resultados.</p>{% endif %}
+
+<h2>Citas ({{cit_r|length}})</h2>
+{% if cit_r %}<table class=tbl><tr><th>Fecha<th>Paciente<th>Motivo<th>Estado</tr>
+{% for cc in cit_r %}<tr><td>{{cc.fecha}}<td>{{cc.nombre}}<td>{{cc.motivo or '—'}}<td>{{cc.estado}}</tr>{% endfor %}</table>
+{% else %}<p style="color:var(--mute)">Sin resultados.</p>{% endif %}
+
+<h2>Ventas ({{ven_r|length}})</h2>
+{% if ven_r %}<table class=tbl><tr><th>Fecha<th>Paciente<th>Total</tr>
+{% for v in ven_r %}<tr><td>{{v.date}}<td>{{v.nombre}}<td>${{"%.0f"|format(v.total or 0)}}</tr>{% endfor %}</table>
+{% else %}<p style="color:var(--mute)">Sin resultados.</p>{% endif %}
+{% endif %}
+""", term=term, pac_r=pac_r, cit_r=cit_r, ven_r=ven_r)
+
+@app.route("/resumen-mensual")
+@need()
+def resumen_mensual():
+    hoy = dt.date.today()
+    try:
+        anio = int(request.args.get("anio", hoy.year))
+        mes = int(request.args.get("mes", hoy.month))
+    except ValueError:
+        anio, mes = hoy.year, hoy.month
+    mes_ant = (anio, mes - 1) if mes > 1 else (anio - 1, 12)
+    mes_sig = (anio, mes + 1) if mes < 12 else (anio + 1, 1)
+    nombres_mes = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+    ym = f"{anio:04d}-{mes:02d}"
+
+    ing_atenciones = float(q("SELECT COALESCE(SUM(valor),0) t FROM atenciones WHERE fecha LIKE ?", (ym + "%",), one=True)["t"] or 0)
+    ing_abonos = float(q("SELECT COALESCE(SUM(monto),0) t FROM abonos WHERE fecha LIKE ?", (ym + "%",), one=True)["t"] or 0)
+    ing_ventas = float(q("SELECT COALESCE(SUM(total),0) t FROM sales WHERE date LIKE ?", (ym + "%",), one=True)["t"] or 0)
+    total_ingresos = ing_atenciones + ing_abonos + ing_ventas
+    total_gastos = float(q("SELECT COALESCE(SUM(amount),0) t FROM expenses WHERE date LIKE ?", (ym + "%",), one=True)["t"] or 0)
+    balance = total_ingresos - total_gastos
+
+    citas_total = q("SELECT COUNT(*) n FROM citas WHERE fecha LIKE ?", (ym + "%",), one=True)["n"]
+    citas_atendidas = q("SELECT COUNT(*) n FROM citas WHERE fecha LIKE ? AND estado='atendida'", (ym + "%",), one=True)["n"]
+    pac_nuevos = q("SELECT COUNT(*) n FROM patients WHERE creado LIKE ?", (ym + "%",), one=True)["n"]
+    pac_distintos = q("SELECT COUNT(DISTINCT patient_id) n FROM atenciones WHERE fecha LIKE ? AND patient_id IS NOT NULL", (ym + "%",), one=True)["n"]
+
+    return page("Resumen mensual", """
+<div class=noprint><h1>Resumen de {{nombres_mes[mes]}} {{anio}}</h1>
+<div class=row style="margin-bottom:14px">
+<a href="/resumen-mensual?anio={{mes_ant[0]}}&mes={{mes_ant[1]}}">&larr; Mes anterior</a>
+<a href="/resumen-mensual?anio={{mes_sig[0]}}&mes={{mes_sig[1]}}">Mes siguiente &rarr;</a>
+<button onclick="window.print()">Imprimir / Guardar como PDF</button>
+</div></div>
+<h1 style="display:none" class=onlyprint>Resumen de {{nombres_mes[mes]}} {{anio}} — Dra. Natalia Morera Odontología Especializada</h1>
+<style>@media print{.onlyprint{display:block!important}}</style>
+<div class=stats>
+<div class=stat style="background:linear-gradient(135deg,#2563eb,#1d4ed8)"><b>${{"%.0f"|format(total_ingresos)}}</b><span>Ingresos del mes</span></div>
+<div class=stat style="background:linear-gradient(135deg,#dc2626,#b91c1c)"><b>${{"%.0f"|format(total_gastos)}}</b><span>Gastos del mes</span></div>
+<div class=stat style="background:linear-gradient(135deg,#16a34a,#15803d)"><b>${{"%.0f"|format(balance)}}</b><span>Balance del mes</span></div>
+<div class=stat style="background:linear-gradient(135deg,#7c3aed,#6d28d9)"><b>{{pac_nuevos}}</b><span>Pacientes nuevos</span></div>
+</div>
+<h2>Detalle de ingresos</h2>
+<table class=tbl><tr><th>Concepto<th>Monto</tr>
+<tr><td>Atenciones clínicas<td>${{"%.0f"|format(ing_atenciones)}}</tr>
+<tr><td>Abonos de pacientes<td>${{"%.0f"|format(ing_abonos)}}</tr>
+<tr><td>Ventas (productos)<td>${{"%.0f"|format(ing_ventas)}}</tr>
+</table>
+<h2>Citas y pacientes</h2>
+<table class=tbl><tr><th>Indicador<th>Valor</tr>
+<tr><td>Citas agendadas en el mes<td>{{citas_total}}</tr>
+<tr><td>Citas atendidas<td>{{citas_atendidas}}</tr>
+<tr><td>Pacientes distintos atendidos<td>{{pac_distintos}}</tr>
+<tr><td>Pacientes nuevos registrados<td>{{pac_nuevos}}</tr>
+</table>
+""", nombres_mes=nombres_mes, anio=anio, mes=mes, mes_ant=mes_ant, mes_sig=mes_sig,
+        total_ingresos=total_ingresos, total_gastos=total_gastos, balance=balance,
+        ing_atenciones=ing_atenciones, ing_abonos=ing_abonos, ing_ventas=ing_ventas,
+        citas_total=citas_total, citas_atendidas=citas_atendidas, pac_nuevos=pac_nuevos, pac_distintos=pac_distintos)
 
 @app.route("/pacientes", methods=["GET", "POST"])
 @need("odontologo", "recepcion", "radiologo")
@@ -1514,6 +1639,28 @@ def servicios():
 {% else %}<tr><td colspan=3>Sin servicios registrados.</tr>{% endfor %}</table>
 <h2>Nuevo servicio</h2><form method=post class=row><input name=name placeholder=Nombre required><input name=category placeholder=Categoría><input name=price type=number step=1000 placeholder=Precio><button>Guardar</button></form>""", ss=ss)
 
+@app.route("/configuracion/respaldo")
+@need()
+def configuracion_respaldo():
+    if session["rol"] != "admin": abort(403)
+    import json as _json
+    tablas = ["patients","citas","plan","labs","recetas","receta_items","caja","caja_mov",
+              "atenciones","products","sales","expenses","purchases","dentists","services",
+              "notes","quotes","abonos","consentimientos","cuentas","settings"]
+    datos = {}
+    for t in tablas:
+        try:
+            filas = q(f"SELECT * FROM {t}")
+            datos[t] = [dict(f) for f in filas]
+        except Exception as e:
+            datos[t] = {"error": str(e)}
+    contenido = _json.dumps(datos, ensure_ascii=False, indent=2, default=str)
+    audit("descargar_respaldo", f"{len(tablas)} tablas")
+    nombre = f"respaldo_consultorio_{dt.date.today().isoformat()}.json"
+    r = app.response_class(contenido, mimetype="application/json")
+    r.headers["Content-Disposition"] = f"attachment; filename={nombre}"
+    return r
+
 @app.route("/configuracion", methods=["GET", "POST"])
 @need()
 def configuracion():
@@ -1561,7 +1708,12 @@ servidor smtp.gmail.com, puerto 587, tu correo de Gmail como usuario, y en contr
 <label>Correo (usuario)<br><input name=smtp_user value="{{smtp_vals.smtp_user}}" placeholder="tuconsultorio@gmail.com" style=width:100%></label>
 <label>Contraseña de aplicación<br><input type=password name=smtp_pass value="{{smtp_vals.smtp_pass}}" style=width:100%></label>
 <label>Nombre que verá el paciente<br><input name=smtp_from_name value="{{smtp_vals.smtp_from_name}}" style=width:100%></label>
-<button>Guardar correo</button></form>""", campos=campos, vals=vals, logo_actual=logo_actual,
+<button>Guardar correo</button></form>
+<h2>Respaldo de la información</h2>
+<p style="font-size:13.5px;color:var(--mute)">Descarga una copia completa de pacientes, citas, ventas, gastos y demás datos
+del consultorio en un archivo. Guárdalo en un lugar seguro (tu computador o una nube) de vez en cuando, por si algo falla.</p>
+<a href="/configuracion/respaldo"><button type=button onclick="this.closest('a').style.pointerEvents='none'">Descargar respaldo ahora</button></a>
+""", campos=campos, vals=vals, logo_actual=logo_actual,
         email_activo=email_listo(), smtp_vals=smtp_vals)
 
 @app.post("/configuracion/correo")
