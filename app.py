@@ -387,10 +387,19 @@ nav .brand b{font-family:Georgia,"Times New Roman",serif;font-size:18px;letter-s
 .pill{display:inline-block;padding:3px 10px;border-radius:99px;font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.02em}
 .pill.pendiente{background:#fff3cd;color:#92680a}.pill.confirmada{background:#dcfce7;color:#15803d}
 .pill.completada{background:#dbeafe;color:#1d4ed8}.pill.cancelada{background:#fee2e2;color:#b91c1c}
-@media(max-width:700px){body{display:block}nav{width:auto}main{padding:16px}}
+@media(max-width:700px){
+body{display:block}
+nav{width:auto;height:auto;max-height:56px;overflow:hidden;position:relative;padding:10px 14px;transition:max-height .25s ease}
+nav.abierto{max-height:2000px;overflow-y:auto}
+nav b{display:inline-block;margin:0 8px 0 0}
+nav small{display:none}
+nav .toggle-menu{display:block;width:100%;text-align:left;background:rgba(255,255,255,.12);color:#fff;border:none;padding:8px 12px;border-radius:8px;font-size:14px;font-weight:600;margin-bottom:6px}
+main{padding:16px}
+}
+@media(min-width:701px){.toggle-menu{display:none}}
 @media print{nav,.noprint{display:none}}
 </style></head><body>
-{% if session.u %}<nav><div class=brand>{% if logo_file %}<img src="/logo?v={{logo_file}}" class=brand-logo>{% else %}<span class=brand-badge>NM</span>{% endif %}<div><b>Dra. Natalia Morera</b><small>Odontología Especializada</small></div></div>
+{% if session.u %}<nav id=navbar><button type=button class=toggle-menu onclick="document.getElementById('navbar').classList.toggle('abierto')">☰ Menú</button><div class=brand>{% if logo_file %}<img src="/logo?v={{logo_file}}" class=brand-logo>{% else %}<span class=brand-badge>NM</span>{% endif %}<div><b>Dra. Natalia Morera</b><small>Odontología Especializada</small></div></div>
 <div class=grp>Panel</div><a href=/>Inicio</a>
 <div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a>
 <div class=grp>Catálogos</div><a href=/odontologos>Odontólogos</a><a href=/servicios>Servicios</a>
