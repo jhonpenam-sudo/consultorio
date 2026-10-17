@@ -400,6 +400,32 @@ nav .brand b{font-family:Georgia,"Times New Roman",serif;font-size:18px;letter-s
 {% if session.rol=='admin' %}<div class=grp>Administración</div><a href=/usuarios>Usuarios y personal</a><a href=/configuracion>Ajustes</a>{% endif %}
 <div class=grp>Portal</div><a href=/reservar>Portal de reservas</a>
 <a href=/logout style="margin-top:14px;color:#ffd3d3">Cerrar sesión ({{session.u}})</a></nav>{% endif %}
+
+<script>
+document.addEventListener("keydown", function(e){
+  var tag = (document.activeElement && document.activeElement.tagName) || "";
+  var enCampo = ["INPUT","TEXTAREA","SELECT"].includes(tag);
+  if (!enCampo) {
+    if (e.key === "ArrowDown") { window.scrollBy({top: 220, behavior: "smooth"}); e.preventDefault(); }
+    if (e.key === "ArrowUp")   { window.scrollBy({top: -220, behavior: "smooth"}); e.preventDefault(); }
+  }
+  if ((e.key === "Delete" || e.key === "Backspace") && !enCampo) {
+    var sel = document.querySelector("tr.fila-sel");
+    if (sel) {
+      var form = sel.querySelector("form[action$=\'/eliminar\']");
+      if (form && confirm("¿Eliminar este registro seleccionado?")) { form.requestSubmit ? form.requestSubmit() : form.submit(); }
+    }
+  }
+});
+document.addEventListener("click", function(e){
+  var fila = e.target.closest("tr");
+  if (!fila || !fila.closest("table")) return;
+  if (e.target.closest("form,button,a,select,input")) return;
+  document.querySelectorAll("tr.fila-sel").forEach(f=>f.classList.remove("fila-sel"));
+  fila.classList.add("fila-sel");
+});
+</script>
+<style>tr.fila-sel{outline:2px solid #2563eb;outline-offset:-2px;background:#eff6ff !important}</style>
 <main><div class=marca-agua><img src="/marca"></div>{% for m in get_flashed_messages() %}<div class=msg>{{m}}</div>{% endfor %}%%BODY%%</main></body></html>"""
 
 def page(t, body, **c):
