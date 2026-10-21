@@ -486,7 +486,7 @@ document.addEventListener("click", function(e){
 
   function procesar(texto){
     var t = normalizar(texto);
-    estado.textContent = "Escuché: \"" + texto + "\"";
+    estado.textContent = 'Escuché: "' + texto + '"';
     for (var i=0;i<rutas.length;i++){
       if (rutas[i][0].test(t)) { window.location.href = rutas[i][1]; return; }
     }
