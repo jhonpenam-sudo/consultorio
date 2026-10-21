@@ -409,7 +409,11 @@ style="width:100%;text-align:left;background:rgba(255,255,255,.12);color:#fff;bo
 {% if avisos %}{% for a in avisos %}<div style="padding:5px 4px;border-bottom:1px solid #eef2f7">{{a}}</div>{% endfor %}
 {% else %}<div style="padding:5px 4px;color:#94a3b8">Sin avisos pendientes.</div>{% endif %}
 </div></div>
-<form action=/buscar method=get style="margin:4px 0 14px"><input name=q placeholder="🔎 Buscar paciente, cita..." style="width:100%;padding:8px 10px;border-radius:8px;border:none;font-size:13px"></form>
+<form action=/buscar method=get id=form-buscar-voz style="margin:4px 0 2px;position:relative">
+<input name=q id=input-buscar-voz placeholder="🔎 Buscar o hablar..." style="width:100%;padding:8px 34px 8px 10px;border-radius:8px;border:none;font-size:13px;box-sizing:border-box">
+<button type=button id=btn-mic title="Buscar o navegar por voz" style="position:absolute;right:3px;top:3px;bottom:3px;width:28px;background:transparent;border:none;cursor:pointer;font-size:15px;padding:0">🎙️</button>
+</form>
+<div id=voz-estado style="display:none;font-size:11.5px;color:#cbd5e1;margin:0 0 10px;min-height:14px"></div>
 <div class=grp>Panel</div><a href=/>Inicio</a>
 <div class=grp>Pacientes</div><a href=/pacientes>Pacientes</a><a href=/citas>Citas / Agenda</a><a href=/recordatorios>Recordatorios</a><a href=/reactivacion>Reactivar pacientes</a><a href=/cumpleanos>🎂 Cumpleaños del mes</a>
 <div class=grp>Catálogos</div><a href=/odontologos>Odontólogos</a><a href=/servicios>Servicios</a>
@@ -443,6 +447,69 @@ document.addEventListener("click", function(e){
   document.querySelectorAll("tr.fila-sel").forEach(f=>f.classList.remove("fila-sel"));
   fila.classList.add("fila-sel");
 });
+(function(){
+  var btn = document.getElementById("btn-mic");
+  if (!btn) return;
+  var estado = document.getElementById("voz-estado");
+  var input = document.getElementById("input-buscar-voz");
+  var formBuscar = document.getElementById("form-buscar-voz");
+  var Reconocedor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Reconocedor) { btn.style.display = "none"; return; }
+  var rec = new Reconocedor();
+  rec.lang = "es-CO";
+  rec.continuous = false;
+  rec.interimResults = false;
+  var escuchando = false;
+
+  var rutas = [
+    [/^(ir a|abrir|ve a|vaya a)?\s*(el )?inicio$/, "/"],
+    [/pacientes/, "/pacientes"],
+    [/citas|agenda/, "/citas"],
+    [/recordatorios/, "/recordatorios"],
+    [/reactiva/, "/reactivacion"],
+    [/cumplea/, "/cumpleanos"],
+    [/caja/, "/caja"],
+    [/gastos/, "/gastos"],
+    [/ventas/, "/ventas"],
+    [/productos|inventario/, "/productos"],
+    [/estad[ií]sticas/, "/estadisticas"],
+    [/resumen mensual|resumen del mes/, "/resumen-mensual"],
+    [/usuarios/, "/usuarios"],
+    [/configuraci[oó]n|ajustes/, "/configuracion"],
+    [/rips/, "/rips"],
+    [/odont[oó]logos/, "/odontologos"],
+  ];
+
+  function normalizar(t){
+    return t.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+
+  function procesar(texto){
+    var t = normalizar(texto);
+    estado.textContent = "Escuché: \"" + texto + "\"";
+    for (var i=0;i<rutas.length;i++){
+      if (rutas[i][0].test(t)) { window.location.href = rutas[i][1]; return; }
+    }
+    var m = t.match(/^(buscar|busca|busca a|buscame a|buscame)\s+(.+)$/);
+    var consulta = m ? m[2] : t;
+    if (input) { input.value = consulta; }
+    if (formBuscar) { formBuscar.submit(); }
+    else { window.location.href = "/buscar?q=" + encodeURIComponent(consulta); }
+  }
+
+  rec.onstart = function(){ escuchando = true; btn.textContent = "🔴"; estado.style.display = "block"; estado.textContent = "Escuchando..."; };
+  rec.onend = function(){ escuchando = false; btn.textContent = "🎙️"; };
+  rec.onerror = function(e){ escuchando = false; btn.textContent = "🎙️"; estado.textContent = "No se pudo escuchar (" + e.error + "). Intenta de nuevo."; };
+  rec.onresult = function(e){
+    var texto = e.results[0][0].transcript;
+    procesar(texto);
+  };
+
+  btn.addEventListener("click", function(){
+    if (escuchando) { rec.stop(); return; }
+    try { rec.start(); } catch(err) {}
+  });
+})();
 </script>
 <style>tr.fila-sel{outline:2px solid #2563eb;outline-offset:-2px;background:#eff6ff !important}</style>
 <main><div class=marca-agua><img src="/marca"></div>{% for m in get_flashed_messages() %}<div class=msg>{{m}}</div>{% endfor %}%%BODY%%</main></body></html>"""
